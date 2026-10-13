@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
+    BigInteger,
     Column,
     DateTime,
     Index,
@@ -53,6 +54,17 @@ class ChatHistoryEntity(Model):
     gmt_created = Column(DateTime, default=datetime.now, comment="Record creation time")
     gmt_modified = Column(DateTime, default=datetime.now, comment="Record update time")
     app_code = Column(String(255), nullable=True, comment="App unique code")
+    # Coordination metadata for one active Agent turn per conversation. The
+    # ordered conversation transcript remains exclusively in ``agent_event``.
+    active_agent_turn_id = Column(
+        String(64), nullable=True, comment="Fenced active Agent turn lease owner"
+    )
+    active_agent_turn_lease_until = Column(
+        DateTime, nullable=True, comment="UTC expiry for active Agent turn lease"
+    )
+    active_agent_turn_fence = Column(
+        BigInteger, nullable=True, comment="Monotonic Agent turn fencing token"
+    )
 
     Index("idx_q_user", "user_name")
     Index("idx_q_mode", "chat_mode")

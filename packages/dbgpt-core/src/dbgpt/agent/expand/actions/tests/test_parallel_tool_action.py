@@ -5,7 +5,12 @@ import json
 import pytest
 
 from dbgpt.agent.expand.actions.react_action import Terminate
-from dbgpt.agent.expand.actions.tool_action import ToolCallSpec, run_tools_batch
+from dbgpt.agent.expand.actions.tool_action import (
+    ToolCallSpec,
+    ToolResultPersistenceError,
+    ToolStartCallbackError,
+    run_tools_batch,
+)
 from dbgpt.agent.expand.tool_calling_agent import (
     NativeToolCallAction,
     ParallelToolAction,
@@ -68,6 +73,97 @@ async def test_run_tools_batch_single_forwards():
     assert out.is_exe_success is True
     # single-element batch uses the legacy run_tool path: observations is str
     assert out.observations == "7"
+
+
+@pytest.mark.asyncio
+async def test_run_tools_batch_persists_each_native_result():
+    persisted = []
+
+    async def append_result(payload):
+        persisted.append(payload)
+
+    out = await run_tools_batch(
+        [
+            ToolCallSpec(name="add", args={"a": 2, "b": 5}, call_id="call-1"),
+            ToolCallSpec(name="multiply", args={"a": 3, "b": 4}, call_id="call-2"),
+        ],
+        _pack(add, multiply),
+        need_vis_render=False,
+        on_tool_result=append_result,
+    )
+
+    assert out.is_exe_success is True
+    assert {item["tool_call_id"] for item in persisted} == {"call-1", "call-2"}
+    assert {item["content"] for item in persisted} == {"7", "12"}
+    assert all(item["success"] for item in persisted)
+
+
+@pytest.mark.asyncio
+async def test_tool_result_persistence_failure_stops_batch_return():
+    async def fail_append(_payload):
+        raise OSError("database unavailable")
+
+    with pytest.raises(ToolResultPersistenceError, match="was not persisted"):
+        await run_tools_batch(
+            [ToolCallSpec(name="add", args={"a": 1, "b": 2}, call_id="call-1")],
+            _pack(add),
+            need_vis_render=False,
+            on_tool_result=fail_append,
+        )
+
+
+@pytest.mark.asyncio
+async def test_pre_tool_guard_failure_prevents_side_effect_and_fails_closed():
+    side_effects = []
+
+    @tool(description="Record an irreversible side effect")
+    def write_record() -> str:
+        side_effects.append("written")
+        return "written"
+
+    async def reject_stale_worker(_payload):
+        raise RuntimeError("turn lease was fenced")
+
+    with pytest.raises(ToolStartCallbackError, match="pre-tool guard failed"):
+        await run_tools_batch(
+            [ToolCallSpec(name="write_record", args={}, call_id="call-stale")],
+            _pack(write_record),
+            need_vis_render=False,
+            on_tool_start=reject_stale_worker,
+        )
+
+    assert side_effects == []
+
+
+@pytest.mark.asyncio
+async def test_parallel_pre_tool_guard_failure_prevents_that_tool_side_effect():
+    side_effects = []
+
+    @tool(description="Record an irreversible side effect")
+    def write_record() -> str:
+        side_effects.append("written")
+        return "written"
+
+    async def reject_stale_worker(payload):
+        if payload["tool_call_id"] == "call-stale":
+            raise RuntimeError("turn lease was fenced")
+
+    with pytest.raises(ToolStartCallbackError, match="pre-tool guard failed"):
+        await run_tools_batch(
+            [
+                ToolCallSpec(name="add", args={"a": 1, "b": 2}, call_id="call-ok"),
+                ToolCallSpec(
+                    name="write_record", args={}, call_id="call-stale"
+                ),
+            ],
+            _pack(add, write_record),
+            need_vis_render=False,
+            on_tool_start=reject_stale_worker,
+        )
+
+    # The other concurrently scheduled call is independent; the guarded tool
+    # itself must never start after its lease check fails.
+    assert side_effects == []
 
 
 @pytest.mark.asyncio

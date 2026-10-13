@@ -100,6 +100,9 @@ CREATE TABLE IF NOT EXISTS `chat_history`
     `sys_code`  varchar(128)                            DEFAULT NULL COMMENT 'System code',
     `gmt_created`  timestamp NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'created time',
     `gmt_modified` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'update time',
+    `active_agent_turn_id` varchar(64) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT 'Fenced active Agent turn lease owner',
+    `active_agent_turn_lease_until` datetime DEFAULT NULL COMMENT 'UTC expiry for active Agent turn lease',
+    `active_agent_turn_fence` bigint DEFAULT NULL COMMENT 'Monotonic Agent turn fencing token',
     UNIQUE KEY `conv_uid` (`conv_uid`),
     PRIMARY KEY (`id`),
     KEY `idx_chat_his_app_code` (`app_code`)
@@ -118,6 +121,20 @@ CREATE TABLE IF NOT EXISTS `chat_history_message`
     PRIMARY KEY (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT 'Chat history message';
 
+
+CREATE TABLE IF NOT EXISTS `agent_event`
+(
+    `event_id` varchar(36) NOT NULL COMMENT 'Stable idempotency ID',
+    `conv_id` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT 'Conversation ID',
+    `event_seq` bigint NOT NULL COMMENT 'Conversation event order',
+    `turn_id` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT 'User turn grouping ID',
+    `event_type` varchar(40) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT 'Closed event type',
+    `schema_version` int NOT NULL COMMENT 'Payload schema version',
+    `payload` longtext NOT NULL COMMENT 'JSON event payload',
+    `created_at` datetime NOT NULL COMMENT 'Event creation time in UTC',
+    PRIMARY KEY (`event_id`),
+    UNIQUE KEY `uk_agent_event_conv_seq` (`conv_id`, `event_seq`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Ordered Agent conversation events';
 
 CREATE TABLE IF NOT EXISTS `chat_feed_back`
 (

@@ -233,6 +233,9 @@ class AgentContext:
     # Stage 2: use provider-native function calling (tools= array) instead of
     # the text Thought:/Action: protocol. Requires model-layer support.
     enable_native_function_calling: bool = False
+    # Use the durable rollout transcript as the native Chat Completions
+    # history source instead of replaying legacy ReAct memory fragments.
+    enable_rollout_history: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Return a dictionary representation of the AgentContext."""

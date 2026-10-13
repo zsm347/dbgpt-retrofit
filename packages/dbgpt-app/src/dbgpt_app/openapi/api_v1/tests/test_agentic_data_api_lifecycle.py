@@ -10,6 +10,31 @@ from dbgpt_app.openapi.api_v1 import agentic_data_api
 from dbgpt_app.openapi.api_v1.react_final import AgentFinalAnswer
 
 
+def test_rollout_prompt_replaces_text_react_protocol() -> None:
+    prompt = agentic_data_api._apply_rollout_native_tool_protocol(
+        """## Autonomous Decision Principles
+For each step, output Thought -> Action Intention -> Action Reason -> Action
+   -> Action Input.
+Wait for the system to return Observation before deciding on the next step.
+## ReAct Output Format
+Action: tool name
+IMPORTANT: Tool calls are ONLY valid in the textual
+Thought/Action/Action Input format shown above.
+## Later Section
+Keep this section.
+"""
+    )
+
+    assert "For each step, invoke tools using provider-native function calls." in prompt
+    assert "Continue after receiving the structured result" in prompt
+    assert "## ReAct Output Format" not in prompt
+    assert "ONLY valid in the textual" not in prompt
+    assert "Action Input format must be" not in prompt
+    assert "Thought -> Action" not in prompt
+    assert "## Later Section\nKeep this section." in prompt
+    assert "Authoritative Native Tool Protocol" in prompt
+
+
 def _decode_sse_event(event: str):
     assert event.startswith("data: ")
     return json.loads(event.removeprefix("data: ").strip())
@@ -48,6 +73,7 @@ def test_history_failure_does_not_drop_final_or_done(caplog) -> None:
 async def test_closing_stream_cancels_and_awaits_agent_task(monkeypatch) -> None:
     task_started = asyncio.Event()
     task_finished = asyncio.Event()
+    cleanup_finished = asyncio.Event()
     created_tasks = []
 
     async def _agent_work() -> None:
@@ -57,8 +83,19 @@ async def test_closing_stream_cancels_and_awaits_agent_task(monkeypatch) -> None
         finally:
             task_finished.set()
 
-    async def _fake_stream_impl(dialogue, tool_mode="full", agent_task_holder=None):
-        del dialogue, tool_mode
+    async def _fake_stream_impl(
+        dialogue,
+        tool_mode="full",
+        attachment_ctx=None,
+        agent_task_holder=None,
+        cleanup_holder=None,
+    ):
+        del dialogue, tool_mode, attachment_ctx
+
+        async def _cleanup():
+            cleanup_finished.set()
+
+        cleanup_holder.append(_cleanup)
         task = asyncio.create_task(_agent_work())
         created_tasks.append(task)
         agent_task_holder.append(task)
@@ -81,14 +118,21 @@ async def test_closing_stream_cancels_and_awaits_agent_task(monkeypatch) -> None
     assert created_tasks[0].cancelled()
     assert created_tasks[0].done()
     assert task_finished.is_set()
+    assert cleanup_finished.is_set()
 
 
 @pytest.mark.asyncio
 async def test_runtime_failure_emits_structured_final_and_done(
     monkeypatch, caplog
 ) -> None:
-    async def _failing_stream_impl(dialogue, tool_mode="full", agent_task_holder=None):
-        del dialogue, tool_mode, agent_task_holder
+    async def _failing_stream_impl(
+        dialogue,
+        tool_mode="full",
+        attachment_ctx=None,
+        agent_task_holder=None,
+        cleanup_holder=None,
+    ):
+        del dialogue, tool_mode, attachment_ctx, agent_task_holder, cleanup_holder
         if False:
             yield ""
         raise RuntimeError("model stream failed")
@@ -119,9 +163,13 @@ async def test_runtime_failure_emits_structured_final_and_done(
 @pytest.mark.asyncio
 async def test_runtime_failure_does_not_duplicate_a_final_event(monkeypatch) -> None:
     async def _partially_failing_stream_impl(
-        dialogue, tool_mode="full", agent_task_holder=None
+        dialogue,
+        tool_mode="full",
+        attachment_ctx=None,
+        agent_task_holder=None,
+        cleanup_holder=None,
     ):
-        del dialogue, tool_mode, agent_task_holder
+        del dialogue, tool_mode, attachment_ctx, agent_task_holder, cleanup_holder
         yield agentic_data_api._sse_event(
             AgentFinalAnswer(content="answer").to_sse_payload()
         )
@@ -157,8 +205,14 @@ async def test_response_disconnect_closes_stream_and_agent_task(monkeypatch) -> 
         finally:
             task_finished.set()
 
-    async def _fake_stream_impl(dialogue, tool_mode="full", agent_task_holder=None):
-        del dialogue, tool_mode
+    async def _fake_stream_impl(
+        dialogue,
+        tool_mode="full",
+        attachment_ctx=None,
+        agent_task_holder=None,
+        cleanup_holder=None,
+    ):
+        del dialogue, tool_mode, attachment_ctx
         task = asyncio.create_task(_agent_work())
         created_tasks.append(task)
         agent_task_holder.append(task)

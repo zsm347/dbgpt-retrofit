@@ -27,6 +27,7 @@ from dbgpt.agent import (
 )
 from dbgpt.agent.resource import BaseTool, ToolPack
 from dbgpt.agent.util.react_parser import ReActOutputParser, ReActStep
+from dbgpt.core.interface.message import ModelMessage, ModelMessageRoleType
 from dbgpt.util.configure import DynConfig
 from dbgpt.util.error_types import LLMChatError
 from dbgpt.util.json_utils import parse_or_raise_error
@@ -204,6 +205,7 @@ class ParallelToolAction(ReActAction):
             self.resource,
             self.render_protocol,
             need_vis_render=need_vis_render,
+            on_tool_result=kwargs.get("rollout_on_tool_result"),
         )
 
         # Re-attach ReAct metadata (mirrors ReActAction.run post-processing).
@@ -239,6 +241,27 @@ class NativeToolCallAction(ParallelToolAction):
         """Perform the action from native tool_calls or text fallback."""
         tool_calls = kwargs.get("tool_calls")
         if not tool_calls:
+            if kwargs.get("rollout_on_tool_result") is not None:
+                parser = kwargs.get("parser")
+                parsed_steps = parser.parse(ai_message) if parser else []
+                if any(step.action for step in parsed_steps):
+                    raise ValueError(
+                        "Rollout mode requires native function calls; a textual "
+                        "ReAct action was not executed."
+                    )
+                if not ai_message or not ai_message.strip():
+                    raise ValueError(
+                        "The model returned neither a native tool call nor a "
+                        "final answer."
+                    )
+                # Plain assistant text is a final answer in native rollout mode.
+                # It has already been persisted as an assistant_message event.
+                return ActionOutput(
+                    is_exe_success=True,
+                    content=ai_message,
+                    observations=ai_message,
+                    terminate=True,
+                )
             # No native tool calls — fall back to text ReAct parsing.
             try:
                 return await super().run(
@@ -278,6 +301,8 @@ class NativeToolCallAction(ParallelToolAction):
             self.resource,
             self.render_protocol,
             need_vis_render=need_vis_render,
+            on_tool_result=kwargs.get("rollout_on_tool_result"),
+            on_tool_start=kwargs.get("rollout_on_tool_start"),
         )
         out.action_intention = "\n".join(intentions) or None
         # Prefer the structured thought meta args; fall back to the model's
@@ -329,6 +354,27 @@ class ToolCallingReActAgent(ReActAgent):
         # Native function-calling tool calls captured during thinking(); kept
         # on the instance (not a pydantic field) and consumed by act().
         object.__setattr__(self, "_pending_native_tool_calls", None)
+        object.__setattr__(self, "_rollout_message_loader", None)
+        object.__setattr__(self, "_rollout_on_assistant_message", None)
+        object.__setattr__(self, "_rollout_on_tool_result", None)
+        object.__setattr__(self, "_rollout_on_tool_start", None)
+        object.__setattr__(self, "_rollout_on_model_call", None)
+
+    def configure_rollout_history(
+        self,
+        *,
+        message_loader,
+        on_assistant_message,
+        on_tool_result,
+        on_tool_start=None,
+        on_model_call=None,
+    ) -> None:
+        """Wire storage-agnostic callbacks for the durable native transcript."""
+        object.__setattr__(self, "_rollout_message_loader", message_loader)
+        object.__setattr__(self, "_rollout_on_assistant_message", on_assistant_message)
+        object.__setattr__(self, "_rollout_on_tool_result", on_tool_result)
+        object.__setattr__(self, "_rollout_on_tool_start", on_tool_start)
+        object.__setattr__(self, "_rollout_on_model_call", on_model_call)
 
     def prepare_act_param(
         self,
@@ -351,6 +397,8 @@ class ToolCallingReActAgent(ReActAgent):
                 ctx is not None and ctx.enable_parallel_tool_execution
             ),
             "tool_calls": getattr(self, "_pending_native_tool_calls", None),
+            "rollout_on_tool_result": getattr(self, "_rollout_on_tool_result", None),
+            "rollout_on_tool_start": getattr(self, "_rollout_on_tool_start", None),
         }
 
     async def act(
@@ -461,17 +509,56 @@ class ToolCallingReActAgent(ReActAgent):
         last_model = None
         last_err = None
         retry_count = 0
-        llm_messages = [message.to_llm_message() for message in messages]
+        message_loader = getattr(self, "_rollout_message_loader", None)
+        if message_loader:
+            projection = await message_loader()
+            history = list(getattr(projection, "messages", projection))
+            llm_messages = ModelMessage.to_common_messages(history)
+            system_messages = [
+                message.to_llm_message()
+                for message in messages
+                if message.role == ModelMessageRoleType.SYSTEM
+            ]
+            # The durable projection normally contains the current user event
+            # because the API starts the rollout turn before invoking the
+            # agent.  Keep a small fallback here as well: a stale/empty
+            # projection must never turn a non-empty current request into a
+            # system-only provider call.  Compare with the last projected user
+            # message so normal turns are not duplicated.  Other non-system
+            # messages (legacy memory fragments, observations, etc.) remain
+            # excluded from this native transcript.
+            projected_users = [
+                message.get("content")
+                for message in llm_messages
+                if message.get("role") == "user"
+            ]
+            current_user_messages = [
+                {"role": "user", "content": message.content}
+                for message in messages
+                if message.role == ModelMessageRoleType.HUMAN
+            ]
+            if current_user_messages and (
+                not projected_users
+                or projected_users[-1] != current_user_messages[-1].get("content")
+            ):
+                llm_messages.append(current_user_messages[-1])
+            llm_messages = system_messages + llm_messages
+        else:
+            llm_messages = [message.to_llm_message() for message in messages]
         while retry_count < 3:
             llm_model = await self._a_select_llm_model(last_model)
             try:
+                model_call_guard = getattr(self, "_rollout_on_model_call", None)
+                if model_call_guard:
+                    await model_call_guard()
+                request_messages = [dict(message) for message in llm_messages]
                 if prompt:
-                    llm_messages = _new_system_message(prompt) + llm_messages
+                    request_messages = _new_system_message(prompt) + request_messages
                 if not self.llm_client:
                     raise ValueError("LLM client is not initialized!")
                 response = await self.llm_client.create_with_output(
-                    context=llm_messages[-1].pop("context", None),
-                    messages=llm_messages,
+                    context=request_messages[-1].pop("context", None),
+                    messages=request_messages,
                     llm_model=llm_model,
                     max_new_tokens=self.not_null_agent_context.max_new_tokens,
                     temperature=self.not_null_agent_context.temperature,
@@ -486,6 +573,18 @@ class ToolCallingReActAgent(ReActAgent):
                 )
                 text = response.gen_text_with_thinking() if response else ""
                 tool_calls = getattr(response, "tool_calls", None) or None
+                rollout_callback = getattr(self, "_rollout_on_assistant_message", None)
+                if rollout_callback and response:
+                    content = response.text if response.has_text else None
+                    if content is None and not tool_calls:
+                        content = ""
+                    await rollout_callback(
+                        {
+                            "content": content,
+                            "tool_calls": tool_calls or [],
+                            "finish_reason": response.finish_reason,
+                        }
+                    )
                 if tool_calls:
                     object.__setattr__(self, "_pending_native_tool_calls", tool_calls)
                 return text, llm_model

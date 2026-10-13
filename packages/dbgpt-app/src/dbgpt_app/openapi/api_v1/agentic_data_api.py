@@ -8,8 +8,19 @@ import shutil
 import tempfile
 import uuid
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, List, Optional, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncGenerator,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+)
 from urllib.parse import urlparse
 
 from fastapi import (
@@ -35,6 +46,7 @@ from dbgpt.configs.model_config import SKILLS_DIR, resolve_root_path
 from dbgpt.core import PromptTemplate
 from dbgpt.model.cluster import WorkerManagerFactory
 from dbgpt.util.json_utils import parse_or_raise_error
+from dbgpt_app.agent_memory import get_agent_memory_bridge
 from dbgpt_app.openapi.api_view_model import (
     ConversationVo,
     Result,
@@ -75,6 +87,65 @@ DEFAULT_SKILLS_DIR = SKILLS_DIR
 AUTO_DATA_MARKER_PATTERN = re.compile(
     r"###([A-Z0-9_]+)_START###\s*(.*?)\s*###\1_END###", re.DOTALL
 )
+
+_ROLLOUT_NATIVE_TOOL_PROTOCOL = """## Authoritative Native Tool Protocol
+This request is backed by an ordered Chat Completions rollout. The registered
+function schemas are the only tool-calling protocol:
+- Invoke a tool only as a provider-native function tool call using its exact
+  registered name and JSON arguments. Never encode a tool call as textual
+  `Action:` / `Action Input:` content or emit pseudo tool-call markup.
+- After a tool call, the tool result will be returned as a structured tool
+  message associated with that call ID. Use that result to decide the next step.
+- When finished, return a normal assistant final answer or call the registered
+  `terminate` function natively. Do not fabricate a tool result.
+- Any earlier instruction in this prompt, a loaded skill, or connector description
+  that asks for textual ReAct tool calls is superseded by this protocol.
+"""
+
+
+def _apply_rollout_native_tool_protocol(prompt: str) -> str:
+    """Replace the text ReAct wire format when history is stored natively."""
+    prompt = re.sub(
+        r"For each step, output Thought -> Action Intention -> Action Reason -> Action\s*"
+        r"-> Action Input\.",
+        "For each step, invoke tools using provider-native function calls.",
+        prompt,
+    )
+    prompt = re.sub(
+        r"Wait for the system to return Observation before deciding on the next step\.",
+        "Continue after receiving the structured result for each tool call.",
+        prompt,
+    )
+    prompt = re.sub(
+        r"(?:directly )?call terminate to\s*return the final result\. The Action Input format must be\s*"
+        r"\{\s*\"result\"\s*:\s*\"final answer\"\s*\}\.",
+        "Return a final assistant answer, or call the registered terminate function natively.",
+        prompt,
+        flags=re.IGNORECASE,
+    )
+    prompt = re.sub(
+        r"When the task is completed, call the terminate tool to return the final result\.\s*"
+        r"The Action Input format must be\s*\{\s*\"result\"\s*:\s*\"final answer\"\s*\}\.",
+        "When the task is completed, return a final assistant answer or call the registered terminate function natively.",
+        prompt,
+        flags=re.IGNORECASE,
+    )
+    # Remove the two legacy output-format blocks, which explicitly prohibit native
+    # calls. Preserve any sections appended after them (e.g. dispatch guidance).
+    prompt = re.sub(
+        r"(?ms)^## ReAct Output Format\n.*?"
+        r"Thought/Action/Action Input format shown above\.",
+        "",
+        prompt,
+    )
+    prompt = prompt.replace(
+        "Tools (call directly with `Action: <tool_name>`):",
+        "Tools (invoke using their registered native function schemas):",
+    ).replace(
+        "with `Action: <tool_name>`, NOT through `execute_tool`.",
+        "using their registered native function schemas, not through `execute_tool`.",
+    )
+    return f"{prompt.rstrip()}\n\n{_ROLLOUT_NATIVE_TOOL_PROTOCOL}"
 
 
 async def _resolve_model_context_tokens(
@@ -1093,19 +1164,23 @@ async def _react_agent_stream(
         attachment_ctx: Pre-resolved attachment context for this turn (or
             ``None`` for pure-text / legacy ``file_path`` requests).
     """
+    inner_stream = _react_agent_stream_inner(dialogue, tool_mode, attachment_ctx)
     try:
-        async for event in _react_agent_stream_inner(
-            dialogue, tool_mode, attachment_ctx
-        ):
+        async for event in inner_stream:
             yield event
     finally:
-        if attachment_ctx is not None:
-            try:
-                attachment_ctx.close()
-            except Exception:
-                logger.warning(
-                    "Failed to close session attachment context", exc_info=True
-                )
+        try:
+            # ``async for`` does not implicitly close its async iterator when
+            # this outer generator is closed by an SSE client disconnect.
+            await inner_stream.aclose()
+        finally:
+            if attachment_ctx is not None:
+                try:
+                    attachment_ctx.close()
+                except Exception:
+                    logger.warning(
+                        "Failed to close session attachment context", exc_info=True
+                    )
 
 
 def _legacy_upload_base_dir() -> str:
@@ -1173,6 +1248,7 @@ async def _react_agent_stream_inner(
 ) -> AsyncGenerator[str, None]:
     """Stream ReAct events while owning the lifetime of its background task."""
     agent_task_holder: List["asyncio.Task[Any]"] = []
+    cleanup_holder: List[Callable[[], Awaitable[None]]] = []
     final_emitted = False
     done_emitted = False
     try:
@@ -1181,6 +1257,7 @@ async def _react_agent_stream_inner(
             tool_mode=tool_mode,
             attachment_ctx=attachment_ctx,
             agent_task_holder=agent_task_holder,
+            cleanup_holder=cleanup_holder,
         ):
             event_type = _sse_event_type(event)
             final_emitted = final_emitted or event_type == "final"
@@ -1197,8 +1274,15 @@ async def _react_agent_stream_inner(
         if not done_emitted:
             yield _sse_event({"type": "done"})
     finally:
-        if agent_task_holder:
-            await _cancel_and_await_agent_task(agent_task_holder[0])
+        try:
+            if agent_task_holder:
+                await _cancel_and_await_agent_task(agent_task_holder[0])
+        finally:
+            for cleanup in reversed(cleanup_holder):
+                try:
+                    await cleanup()
+                except Exception:
+                    logger.exception("Failed to clean up ReAct stream resources")
 
 
 class _AgentStreamingResponse(StreamingResponse):
@@ -1223,6 +1307,7 @@ async def _react_agent_stream_impl(
     tool_mode: str = "full",
     attachment_ctx: Optional[SessionAttachmentContext] = None,
     agent_task_holder: Optional[List["asyncio.Task[Any]"]] = None,
+    cleanup_holder: Optional[List[Callable[[], Awaitable[None]]]] = None,
 ) -> AsyncGenerator[str, None]:
     """Core ReAct agent streaming logic.
 
@@ -1248,12 +1333,21 @@ async def _react_agent_stream_impl(
     from dbgpt.core import StorageConversation
     from dbgpt.model.cluster.client import DefaultLLMClient
     from dbgpt_serve.agent.agents.db_gpts_memory import MetaDbGptsMessageMemory
+    from dbgpt_serve.agent.db import (
+        ActiveTurnInProgress,
+        AgentEventDao,
+        AgentRolloutSession,
+    )
     from dbgpt_serve.conversation.serve import Serve as ConversationServe
 
     step = 0
     user_input = dialogue.user_input
     if not isinstance(user_input, str):
         user_input = str(user_input or "")
+    # The application-owned observation time is captured once when this turn
+    # enters the agent path.  It is only a source-message time; the optional
+    # memory layer must not treat it as the fact's valid_from automatically.
+    memory_turn_observed_at = datetime.now(timezone.utc)
 
     file_path = None
     knowledge_space = None
@@ -2329,31 +2423,124 @@ print(json.dumps(summary, ensure_ascii=False))
         conv_storage=conv_serve.conv_storage,
         message_storage=conv_serve.message_storage,
     )
-    storage_conv.save_to_storage()
-    storage_conv.start_new_round()
-    # Load the full conversation history (user question + agent final answer)
-    # before appending the current round, then pass it as historical_dialogues
-    # so multi-turn follow-ups see the previous Q&A (mirrors hermes'
-    # conversation_history passed into the loop).
-    historical_dialogues: List[AgentMessage] = []
-    for _msg in storage_conv.get_history_message():
-        if _msg.type == "human":
-            historical_dialogues.append(AgentMessage(content=_msg.content))
-        elif _msg.type == "ai":
-            historical_dialogues.append(AgentMessage(content=_msg.content))
-        elif _msg.type == "view":
-            # view 消息存的是 history_payload(JSON)，提取 final_content 作为 AI 回答
-            _content = _msg.content
-            try:
-                _payload = (
-                    json.loads(_content) if isinstance(_content, str) else _content
+
+    # The event transcript is now the sole model-history source. Refuse to
+    # silently continue a legacy UI-only conversation: that would look like a
+    # successful resume while omitting its prior model context.
+    expected_owner = dialogue.user_name
+    if storage_conv.user_name != expected_owner:
+        yield _sse_event(
+            AgentFinalAnswer(content="无法访问该会话，请新建会话。").to_sse_payload()
+        )
+        yield _sse_event({"type": "done"})
+        return
+    legacy_history = storage_conv.get_history_message()
+    event_dao = AgentEventDao()
+    existing_events = await run_in_threadpool(event_dao.list_by_conv_id, conv_id)
+    if not existing_events and legacy_history:
+        yield _sse_event(
+            AgentFinalAnswer(
+                content="这是尚未启用事件记录的旧会话。为避免丢失上下文，请新建会话继续。"
+            ).to_sse_payload()
+        )
+        yield _sse_event({"type": "done"})
+        return
+
+    # Optional long-term memory integration.  The bridge is disabled by
+    # default and loads the independent Mem0/LangMem prototype lazily only
+    # when explicitly enabled.  Existing DB-GPT rollout memory remains the
+    # source of model history; this block only prepares durable-memory context
+    # and later records the completed user/assistant turn.
+    memory_bridge = get_agent_memory_bridge()
+    memory_scope = None
+    memory_context = ""
+    memory_recent_messages: List[Any] = []
+
+    def _build_recent_memory_messages() -> List[Any]:
+        if memory_bridge is None:
+            return []
+        recent: List[Any] = []
+        for event in existing_events:
+            if event.event_type not in {"user_message", "assistant_message"}:
+                continue
+            content = event.payload.get("content")
+            if not isinstance(content, str) or not content.strip():
+                # Native assistant tool-call messages often have no content;
+                # tool results are deliberately excluded from this v1 path.
+                continue
+            role = "user" if event.event_type == "user_message" else "assistant"
+            observed_at = event.created_at
+            if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+                observed_at = observed_at.replace(tzinfo=timezone.utc)
+            recent.append(
+                memory_bridge.source_message(
+                    message_id=f"{conv_id}:event:{event.event_id}",
+                    role=role,
+                    content=content,
+                    observed_at=observed_at,
                 )
-                if isinstance(_payload, dict):
-                    _content = _payload.get("final_content") or ""
+            )
+        return recent[-10:]
+
+    if memory_bridge is not None:
+        memory_scope = memory_bridge.scope_for(
+            user_name=dialogue.user_name,
+            app_code=dialogue.app_code,
+            sys_code=dialogue.sys_code,
+            conv_id=conv_id,
+        )
+        memory_recent_messages = _build_recent_memory_messages()
+        try:
+            memory_context = await memory_bridge.search_context(
+                scope=memory_scope,
+                question=user_input,
+                reference_time=memory_turn_observed_at,
+            )
+        except Exception:
+            # Memory must not make the main agent unavailable.  The failure is
+            # logged for operators, while the turn continues without context.
+            logger.exception("Long-term memory search failed; continuing without it")
+
+    rollout_session = AgentRolloutSession(conv_id, str(uuid.uuid4()), event_dao)
+    storage_conv.save_to_storage()
+    try:
+        await run_in_threadpool(rollout_session.start_turn, user_input)
+    except ActiveTurnInProgress:
+        yield _sse_event(
+            AgentFinalAnswer(
+                content="这个会话正在处理上一条请求，请等待完成后再试。"
+            ).to_sse_payload()
+        )
+        yield _sse_event({"type": "done"})
+        return
+    lease_renewal_task: Optional[asyncio.Task[Any]] = None
+
+    async def _renew_rollout_lease() -> None:
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await run_in_threadpool(rollout_session.renew_turn_lease)
+            except asyncio.CancelledError:
+                raise
             except Exception:
+                # Subsequent pre-model, pre-tool, and append checks fail closed
+                # if the lease expired or another worker fenced this run out.
+                logger.exception("Failed to renew Agent turn lease")
+                return
+
+    async def _cleanup_rollout_lease() -> None:
+        if lease_renewal_task is not None:
+            lease_renewal_task.cancel()
+            try:
+                await lease_renewal_task
+            except asyncio.CancelledError:
                 pass
-            if _content:
-                historical_dialogues.append(AgentMessage(content=_content))
+        await run_in_threadpool(rollout_session.release_turn_lease)
+
+    if cleanup_holder is not None:
+        cleanup_holder.append(_cleanup_rollout_lease)
+    lease_renewal_task = asyncio.create_task(_renew_rollout_lease())
+    storage_conv.start_new_round()
     storage_conv.add_user_message(user_input)
     context = AgentContext(
         conv_id=conv_id,
@@ -2363,6 +2550,7 @@ print(json.dumps(summary, ensure_ascii=False))
         temperature=dialogue.temperature or 0.2,
         enable_context_management=True,
         enable_native_function_calling=True,
+        enable_rollout_history=True,
     )
 
     # file_ids requests use the public manifest block; legacy file_path and
@@ -2940,6 +3128,12 @@ Thought/Action/Action Input format shown above.
         pass  # graceful degradation
     # --- End connector system prompt injection ---
 
+    if memory_context:
+        workflow_prompt += memory_context
+
+    if context.enable_rollout_history:
+        workflow_prompt = _apply_rollout_native_tool_protocol(workflow_prompt)
+
     # Convert workflow_prompt to PromptTemplate so it is used as system prompt
     # Use jinja2 format to avoid issues with JSON braces { } in the prompt
     workflow_prompt_template = PromptTemplate(
@@ -2958,6 +3152,30 @@ Thought/Action/Action Input format shown above.
     )
 
     agent = await agent_builder.build()
+
+    async def _load_rollout_projection():
+        await run_in_threadpool(rollout_session.assert_turn_lease)
+        return await run_in_threadpool(rollout_session.load_projection)
+
+    async def _append_assistant_event(payload: Dict[str, Any]) -> None:
+        await run_in_threadpool(rollout_session.append, "assistant_message", payload)
+
+    async def _append_tool_result_event(payload: Dict[str, Any]) -> None:
+        await run_in_threadpool(rollout_session.append, "tool_result", payload)
+
+    async def _assert_tool_turn_lease(_payload: Dict[str, Any]) -> None:
+        await run_in_threadpool(rollout_session.assert_turn_lease)
+
+    async def _assert_model_turn_lease() -> None:
+        await run_in_threadpool(rollout_session.assert_turn_lease)
+
+    agent.configure_rollout_history(
+        message_loader=_load_rollout_projection,
+        on_assistant_message=_append_assistant_event,
+        on_tool_result=_append_tool_result_event,
+        on_tool_start=_assert_tool_turn_lease,
+        on_model_call=_assert_model_turn_lease,
+    )
 
     parser = ReActOutputParser()
     received = AgentMessage(content=user_input)
@@ -2982,7 +3200,7 @@ Thought/Action/Action Input format shown above.
             received_message=received,
             sender=agent,
             stream_callback=stream_callback,
-            historical_dialogues=historical_dialogues,
+            historical_dialogues=[],
         )
 
     agent_task = asyncio.create_task(run_agent())
@@ -3475,6 +3693,14 @@ Thought/Action/Action Input format shown above.
         reply = await agent_task
     except Exception as e:
         err_msg = f"React agent failed: {e}"
+        try:
+            await run_in_threadpool(
+                rollout_session.append,
+                "turn_aborted",
+                {"reason": "agent_exception"},
+            )
+        except Exception:
+            logger.exception("Failed to persist aborted rollout turn")
         fail_running_subagent_history(subagent_history)
         error_payload = _build_react_history_payload(
             final_content=err_msg,
@@ -3561,7 +3787,49 @@ Thought/Action/Action Input format shown above.
     else:
         final_content = reply.content or ""
 
+    terminal_event = "turn_completed" if reply.success else "turn_aborted"
+    terminal_payload = (
+        {} if reply.success else {"reason": "agent_returned_unsuccessful"}
+    )
+    try:
+        await run_in_threadpool(
+            rollout_session.append, terminal_event, terminal_payload
+        )
+    except Exception:
+        logger.exception("Failed to persist rollout turn terminal event")
+        yield _sse_event(
+            AgentFinalAnswer(
+                content=(
+                    "回答生成后未能提交会话记录；工具可能已经执行。"
+                    "为避免重复副作用，请先核对执行结果再重试。"
+                )
+            ).to_sse_payload()
+        )
+        yield _sse_event({"type": "done"})
+        return
+
     final_answer = final_answer_assembler.finalize(final_content)
+
+    if (
+        memory_bridge is not None
+        and memory_scope is not None
+        and reply.success
+        and final_answer.content.strip()
+    ):
+        try:
+            await memory_bridge.record_turn(
+                scope=memory_scope,
+                conv_id=conv_id,
+                turn_id=rollout_session.turn_id,
+                user_text=user_input,
+                assistant_text=final_answer.content,
+                observed_at=memory_turn_observed_at,
+                recent_messages=memory_recent_messages,
+            )
+        except Exception:
+            # A memory write is best-effort for the first integration pass;
+            # the completed answer and rollout transcript remain available.
+            logger.exception("Long-term memory write failed after agent answer")
 
     # Persist AI reply with structured history payload
     history_payload = _build_react_history_payload(

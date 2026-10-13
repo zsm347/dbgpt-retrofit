@@ -213,3 +213,10 @@ test_docs
 openspec/
 docs/superpowers/
 .gstack/
+
+# --- local WIP: large datasets / environments / eval artifacts (2026-10-13) ---
+data/longmemeval/
+.tmp_mrag_check/
+pilot/experiments/
+pilot/parsed/
+pilot/.venv-rag-eval/

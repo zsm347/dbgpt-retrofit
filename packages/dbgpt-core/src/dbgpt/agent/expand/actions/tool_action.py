@@ -4,7 +4,7 @@ import asyncio
 import dataclasses
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from dbgpt._private.pydantic import BaseModel, Field
 from dbgpt.vis.tags.vis_plugin import Vis, VisPlugin
@@ -32,6 +32,14 @@ class ToolInput(BaseModel):
         "information required for execution",
     )
     thought: str = Field(..., description="Summary of thoughts to the user")
+
+
+class ToolResultPersistenceError(RuntimeError):
+    """A tool ran, but its result could not be durably recorded."""
+
+
+class ToolStartCallbackError(RuntimeError):
+    """A pre-tool guard failed, so the tool was not allowed to start."""
 
 
 class ToolAction(Action[ToolInput]):
@@ -282,6 +290,8 @@ async def run_tools_batch(
     resource: Resource,
     render_protocol: Optional[Vis] = None,
     need_vis_render: bool = False,
+    on_tool_result: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    on_tool_start: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
 ) -> ActionOutput:
     """Execute multiple tool calls concurrently and aggregate into one output.
 
@@ -307,6 +317,15 @@ async def run_tools_batch(
         )
     if len(specs) == 1:
         spec = specs[0]
+        if on_tool_start:
+            try:
+                await on_tool_start(
+                    {"tool_call_id": spec.call_id, "name": spec.name}
+                )
+            except Exception as exc:
+                raise ToolStartCallbackError(
+                    f"pre-tool guard failed for call {spec.call_id!r}"
+                ) from exc
         out = await run_tool(
             name=spec.name,
             args=spec.args,
@@ -319,9 +338,23 @@ async def run_tools_batch(
         # so native single-tool turns still carry the tool name on ActionOutput.
         if not getattr(out, "action", None):
             out.action = spec.name
+        if on_tool_result:
+            await _persist_tool_result(on_tool_result, spec, out)
         return out
 
     async def _run_one(spec: ToolCallSpec) -> ActionOutput:
+        if on_tool_start:
+            try:
+                await on_tool_start(
+                    {"tool_call_id": spec.call_id, "name": spec.name}
+                )
+            except Exception as exc:
+                # Unlike a tool execution failure, a failed lease/fencing guard
+                # means this worker must not continue the batch or ask the
+                # model for another turn. Preserve that control-flow failure.
+                raise ToolStartCallbackError(
+                    f"pre-tool guard failed for call {spec.call_id!r}"
+                ) from exc
         try:
             out: ActionOutput = await run_tool(
                 name=spec.name,
@@ -339,6 +372,8 @@ async def run_tools_batch(
             )
         if not out.action:
             out.action = spec.name
+        if on_tool_result:
+            await _persist_tool_result(on_tool_result, spec, out)
         return out
 
     outputs: List[ActionOutput] = list(
@@ -351,6 +386,8 @@ async def run_tools_batch(
     # converts its own failures into a failure ActionOutput).
     normalized: List[ActionOutput] = []
     for spec, out in zip(specs, outputs):
+        if isinstance(out, (ToolResultPersistenceError, ToolStartCallbackError)):
+            raise out
         if isinstance(out, BaseException):
             normalized.append(
                 ActionOutput(
@@ -393,3 +430,31 @@ async def run_tools_batch(
         have_retry=have_retry,
         terminate=terminate if terminate else None,
     )
+
+
+async def _persist_tool_result(
+    callback: Callable[[Dict[str, Any]], Awaitable[None]],
+    spec: ToolCallSpec,
+    output: ActionOutput,
+) -> None:
+    """Append exactly the result content the next model request will receive."""
+    if not spec.call_id:
+        raise ToolResultPersistenceError(
+            "native tool result has no provider tool_call_id"
+        )
+    content = (
+        output.content if isinstance(output.content, str) else str(output.content or "")
+    )
+    try:
+        await callback(
+            {
+                "tool_call_id": spec.call_id,
+                "name": spec.name,
+                "content": content,
+                "success": bool(output.is_exe_success),
+            }
+        )
+    except Exception as exc:
+        raise ToolResultPersistenceError(
+            f"tool result for call {spec.call_id!r} was not persisted"
+        ) from exc

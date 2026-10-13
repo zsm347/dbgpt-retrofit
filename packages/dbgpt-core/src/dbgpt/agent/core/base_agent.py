@@ -1344,18 +1344,23 @@ class ConversableAgent(Role, Agent):
             raise ValueError("The received message content is empty!")
         most_recent_memories = ""
         memory_list = []
-        # Read the memories according to the current observation
-        memories = await self.read_memories(observation)
-        if isinstance(memories, list):
-            memory_list = memories
-        else:
-            most_recent_memories = memories
+        # In rollout mode the Chat Completions transcript is authoritative.
+        # Do not inject the same tool observations again as ReAct memory text.
+        rollout_history_enabled = bool(
+            self.agent_context and self.agent_context.enable_rollout_history
+        )
+        if not rollout_history_enabled:
+            memories = await self.read_memories(observation)
+            if isinstance(memories, list):
+                memory_list = memories
+            else:
+                most_recent_memories = memories
         reply_message_str = ""
         if context is None:
             context = {}
         # Inject task progress summary so the LLM always knows what has been done
         # regardless of how many memory fragments have been evicted from the buffer.
-        task_progress = self.task_progress_summary
+        task_progress = None if rollout_history_enabled else self.task_progress_summary
         if task_progress:
             context["task_progress"] = task_progress
         if rely_messages:

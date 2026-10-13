@@ -41,9 +41,16 @@ class PriorityAPIRouter(APIRouter):
         """Sort the routes by priority."""
 
         def my_func(route):
-            if route.path in ["", "/"]:
+            # Recent FastAPI versions can keep an included router container in
+            # ``routes`` while routers are being assembled.  It has no path of
+            # its own; treat it as an ordinary, zero-priority entry instead of
+            # assuming every item is a concrete route.
+            path = getattr(route, "path", None)
+            if path in ["", "/"]:
                 return -100
-            return self.route_priority.get(route.path, 0)
+            if path is None:
+                return 0
+            return self.route_priority.get(path, 0)
 
         self.routes.sort(key=my_func, reverse=True)
 

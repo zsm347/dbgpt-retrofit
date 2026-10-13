@@ -10,6 +10,7 @@ from dbgpt_app.share.models import ShareLinkEntity
 from dbgpt_serve.agent.app.recommend_question.recommend_question import (
     RecommendQuestionEntity,
 )
+from dbgpt_serve.agent.db.agent_event_db import AgentEventEntity
 from dbgpt_serve.agent.hub.db.my_plugin_db import MyPluginEntity
 from dbgpt_serve.agent.hub.db.plugin_hub_db import PluginHubEntity
 from dbgpt_serve.datasource.manages.connect_config_db import ConnectConfigEntity
@@ -35,6 +36,7 @@ _MODELS = [
     ConnectConfigEntity,
     ChatHistoryEntity,
     ChatHistoryMessageEntity,
+    AgentEventEntity,
     ModelInstanceEntity,
     FlowServeEntity,
     RecommendQuestionEntity,
