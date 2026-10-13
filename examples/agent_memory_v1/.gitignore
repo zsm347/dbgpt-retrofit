@@ -1,0 +1,7 @@
+# Local runtime state and the independently managed prototype environment.
+.venv/
+data/
+__pycache__/
+tests/__pycache__/
+*.db
+*.db-*

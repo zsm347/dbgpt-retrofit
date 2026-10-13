@@ -1,0 +1,50 @@
+{
+  "date": "2026-10-10",
+  "kind": "db-gpt-real-bridge-observation",
+  "model": "qwen3.8-max",
+  "embedding": "text-embedding-v3/1024",
+  "endpoint": "/api/v1/chat/react-agent",
+  "scope": "user:001 (the route replaces the request body's user_name with the authenticated user)",
+  "scenarios": [
+    {
+      "name": "write_preference",
+      "input": "用户偏好使用 PostgreSQL",
+      "answer": "收到",
+      "result": "one memory added"
+    },
+    {
+      "name": "query_preference",
+      "question": "我偏好使用什么数据库？",
+      "answer": "PostgreSQL",
+      "result": "one memory recalled; query turn did not add a new memory after the prompt guard"
+    },
+    {
+      "name": "state_change",
+      "input": "现在改用 MySQL",
+      "answer": "收到",
+      "result": "one new current memory added and the PostgreSQL record points to it via superseded_by"
+    },
+    {
+      "name": "query_current_state",
+      "question": "我现在优先使用什么数据库？",
+      "answer": "MySQL",
+      "result": "current memory recalled; query turn did not add a new memory"
+    }
+  ],
+  "final_record_count": 2,
+  "final_records": [
+    {
+      "content": "用户偏好使用 PostgreSQL，后续数据库分析优先使用它。",
+      "superseded_by": "the MySQL record"
+    },
+    {
+      "content": "用户现在改用 MySQL，后续数据库分析优先使用它；此前偏好 PostgreSQL 已被替代。",
+      "superseded_by": null
+    }
+  ],
+  "limitations": [
+    "This is one real user scope and four requests, not an accuracy benchmark.",
+    "BM25 is disabled in this environment because fastembed is not installed; retrieval is semantic only.",
+    "It does not validate production deployment, concurrency recovery, or all source/time cases."
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "purpose": "Follow-up robustness evidence for historical backfill, enrichment, and state-change wording variants; API completion is not a semantic accuracy score.",
+  "run": {
+    "source": "temporary runner output from 2026-10-10",
+    "fixture": "examples/agent_memory_v1/tests/fixtures/memory_variants.json",
+    "mem0ai": "2.2.1",
+    "langmem": "0.0.30",
+    "chat_model": "qwen-plus",
+    "embedding_model": "text-embedding-v3",
+    "embedding_dimensions": 1024,
+    "cases": 7,
+    "writes": 14,
+    "answers": 12,
+    "write_errors": 0,
+    "answer_errors": 0,
+    "source_unchanged": true
+  },
+  "observations": {
+    "historical_backfill": "All three historical/backfill phrasings created a separate dated MySQL memory and left the current PostgreSQL memory unchanged. Historical and current queries selected the expected record.",
+    "enrichment": "Both preference-enrichment phrasings used UPDATE and merged the added detail into the existing memory, retaining both user source IDs.",
+    "state_change": "Both state-change phrasings created a new current record and linked the old record with superseded_by. Current and previous-state queries selected the expected record."
+  },
+  "limits": [
+    "This is one real-model run on synthetic wording variants, not a benchmark or proof of general accuracy.",
+    "The runner used vector-only candidate retrieval because optional FastEmbed/spaCy components were not installed.",
+    "The run does not establish reliable point-in-time knowledge reconstruction; that remains a separate provenance/history requirement."
+  ]
+}

@@ -1,0 +1,10 @@
+# Independent environment for the first memory write prototype.
+# The two memory components are intentionally fixed to the audited versions.
+mem0ai==2.2.1
+langmem==0.0.30
+
+# Explicit client used to give LangMem a DashScope OpenAI-compatible chat model.
+langchain-openai>=1.0,<2
+
+# Used directly by the source-aware schemas.
+pydantic>=2,<3

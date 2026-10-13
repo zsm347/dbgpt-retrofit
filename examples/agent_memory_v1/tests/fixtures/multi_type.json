@@ -1,0 +1,436 @@
+[
+  {
+    "id": "A_preferences",
+    "description": "偏好去重、补充、不同情境、稳定事实与闲聊",
+    "turns": [
+      {
+        "time": "2026-09-25T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "技术问题请先给结论，再给步骤，尽量用中文。我的职业是数据工程师。"
+          ],
+          [
+            "assistant",
+            "好的，技术问题我会按这种方式回答。"
+          ]
+        ]
+      },
+      {
+        "time": "2026-09-26T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "再强调一下，技术问题先说结论，然后给步骤。"
+          ],
+          [
+            "assistant",
+            "收到。"
+          ]
+        ]
+      },
+      {
+        "time": "2026-09-28T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "技术步骤涉及命令时，请给可复制的命令并解释重要参数。代码审查时可以详细展开。"
+          ],
+          [
+            "assistant",
+            "收到。"
+          ]
+        ]
+      },
+      {
+        "time": "2026-10-01T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "周报请写得简短，只列进展和风险；代码审查仍然详细一些。"
+          ],
+          [
+            "assistant",
+            "收到。"
+          ]
+        ]
+      },
+      {
+        "time": "2026-10-08T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "哈哈，今天咖啡不错。谢谢你！"
+          ],
+          [
+            "assistant",
+            "不客气。"
+          ]
+        ]
+      }
+    ],
+    "queries": [
+      {
+        "question": "我希望技术问题怎么回答？",
+        "expected": "结论在先、步骤在后、中文；涉及命令给可复制命令和重要参数。"
+      },
+      {
+        "question": "代码审查和周报分别应该用什么详细程度？",
+        "expected": "审查详细，周报简短，只列进展和风险；不把两种情境误判成偏好变化。"
+      },
+      {
+        "question": "我的职业是什么？",
+        "expected": "数据工程师；不能把咖啡闲聊形成持久偏好。"
+      }
+    ]
+  },
+  {
+    "id": "B_project_state",
+    "description": "项目状态切换、明确事实时间、较晚导入的旧事件、未来计划",
+    "turns": [
+      {
+        "time": "2026-09-25T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "Atlas 项目生产主库目前使用 SQLite。运行时必须用 Python 3.11。"
+          ],
+          [
+            "assistant",
+            "收到。"
+          ]
+        ]
+      },
+      {
+        "time": "2026-10-01T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "Atlas 的生产主库已经迁移成功，从2026年10月1日起正式使用 PostgreSQL，SQLite不再承担生产主库。"
+          ],
+          [
+            "assistant",
+            "收到。"
+          ]
+        ]
+      },
+      {
+        "time": "2026-10-02T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "补录旧记录：2025年6月1日至2025年12月31日，Atlas 的生产主库曾使用 MySQL。那是过去的情况。"
+          ],
+          [
+            "assistant",
+            "收到。"
+          ]
+        ]
+      },
+      {
+        "time": "2026-10-07T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "我们考虑从2026年11月1日起把 Atlas 分析任务迁到 ClickHouse，目前只是计划，尚未实施，生产主库仍是 PostgreSQL。"
+          ],
+          [
+            "assistant",
+            "收到。"
+          ]
+        ]
+      }
+    ],
+    "queries": [
+      {
+        "question": "Atlas 现在的生产主库是什么？",
+        "expected": "PostgreSQL；不能由较晚写入的 MySQL 旧事实或 ClickHouse 计划覆盖。"
+      },
+      {
+        "question": "Atlas 在2026年9月30日和10月2日分别用什么生产主库？",
+        "expected": "9月30日最后明确报告 SQLite，10月2日 PostgreSQL；不能编造 SQLite 开始时间。"
+      },
+      {
+        "question": "Atlas 在2025年8月的生产主库是什么？",
+        "expected": "MySQL，使用已有明确区间。"
+      },
+      {
+        "question": "Atlas 已经迁移到 ClickHouse 了吗？",
+        "expected": "尚未；11月1日是计划、只涉及分析任务；当前生产主库 PostgreSQL。"
+      },
+      {
+        "question": "Atlas 的运行时有什么约束？",
+        "expected": "Python 3.11，保留无关旧事实。"
+      }
+    ]
+  },
+  {
+    "id": "C_provenance_plan",
+    "description": "assistant建议、工具结果、分环境用户确认、条件计划",
+    "turns": [
+      {
+        "time": "2026-10-01T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "Boreal 项目的缓存方案还没决定，先帮我比较一下。"
+          ],
+          [
+            "assistant",
+            "可以考虑 Redis，它适合缓存；这只是候选建议，还需要你确认。"
+          ]
+        ]
+      },
+      {
+        "time": "2026-10-02T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "先做 staging 连通性检查。这只是连通性检查，不代表生产方案通过。"
+          ],
+          [
+            "tool",
+            "tool=redis_ping environment=staging endpoint=staging-cache status=success latency_ms=3"
+          ],
+          [
+            "assistant",
+            "staging 的连通性检查通过，生产方案仍待评估。"
+          ]
+        ]
+      },
+      {
+        "time": "2026-10-06T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "我确认 Boreal 的 staging 缓存使用 Redis。生产环境还没批准，请不要把 staging 的结论套过去。"
+          ],
+          [
+            "assistant",
+            "收到。"
+          ]
+        ]
+      },
+      {
+        "time": "2026-10-07T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "计划2026年11月3日把 Redis 用到 Boreal 生产环境，前提是压测和安全检查通过；还没有完成这两项检查。"
+          ],
+          [
+            "assistant",
+            "收到。"
+          ]
+        ]
+      }
+    ],
+    "queries": [
+      {
+        "question": "Boreal 生产环境已经采用 Redis 了吗？",
+        "expected": "尚未批准，11月3日是有前提的计划；工具连通性和staging确认都不是生产批准。"
+      },
+      {
+        "question": "Boreal staging 的缓存方案是谁确认的？什么时候？",
+        "expected": "用户在10月6日消息中确认 Redis；不是assistant10月1日的建议。"
+      },
+      {
+        "question": "10月2日的工具具体证明了什么？",
+        "expected": "staging Redis连通/3ms等工具观察；未证明生产安全/压测或生产可用。"
+      },
+      {
+        "question": "Boreal 的生产 Redis 计划有哪些前提？",
+        "expected": "压测和安全检查通过，尚未完成，计划日期11月3日。"
+      }
+    ]
+  },
+  {
+    "id": "D_correction",
+    "description": "更正先前错误、历史事实较晚写入、来源追溯",
+    "turns": [
+      {
+        "time": "2026-10-01T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "Cedar 团队当前有40名正式成员。"
+          ],
+          [
+            "assistant",
+            "收到。"
+          ]
+        ]
+      },
+      {
+        "time": "2026-10-03T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "我更正一下：之前 Cedar 团队40人是打字错误，实际当前是14名正式成员；并不是从40人裁到14人。"
+          ],
+          [
+            "assistant",
+            "收到。"
+          ]
+        ]
+      },
+      {
+        "time": "2026-10-07T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "补充历史事实：2024年12月31日，Cedar 团队只有8名正式成员。当前人数仍为14人。"
+          ],
+          [
+            "assistant",
+            "收到。"
+          ]
+        ]
+      }
+    ],
+    "queries": [
+      {
+        "question": "Cedar 团队现在有多少正式成员？",
+        "expected": "14；错误40和历史8都不能覆盖。"
+      },
+      {
+        "question": "Cedar 是否经历过从40人裁到14人的变化？",
+        "expected": "没有这个依据；40是打字错误，不能形成已成立历史。"
+      },
+      {
+        "question": "2024年12月31日 Cedar 有多少正式成员？",
+        "expected": "8人。"
+      },
+      {
+        "question": "为什么你认为 Cedar 当前是14人，来源是哪条消息？",
+        "expected": "用户10月3日明确更正，10月7日再次确认；来源不可归为assistant。"
+      }
+    ]
+  },
+  {
+    "id": "E_ambiguous_context",
+    "description": "未解决矛盾、不同环境、澄清后定位",
+    "turns": [
+      {
+        "time": "2026-10-01T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "Dune 项目生产环境当前缓存 TTL 配置为300秒，测试环境 TTL 是60秒。"
+          ],
+          [
+            "assistant",
+            "收到。"
+          ]
+        ]
+      },
+      {
+        "time": "2026-10-03T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "我从另一张 Dune 配置截图看到 TTL 是600秒，但不知道截图来自生产、staging还是测试。先保留这个线索，不要据此改已知生产配置。"
+          ],
+          [
+            "assistant",
+            "收到。"
+          ]
+        ]
+      },
+      {
+        "time": "2026-10-07T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "查清了：600秒的截图来自 Dune staging。生产环境确认仍然是300秒，测试环境仍然是60秒。"
+          ],
+          [
+            "assistant",
+            "收到。"
+          ]
+        ]
+      }
+    ],
+    "intermediate": {
+      "1": [
+        {
+          "question": "Dune 的生产缓存 TTL 是否已经改成600秒？",
+          "expected": "不能确认改为600；原生产300，新截图600来源环境未知。"
+        }
+      ]
+    },
+    "queries": [
+      {
+        "question": "Dune 生产、staging 和测试环境缓存 TTL 各是多少？",
+        "expected": "生产300、staging600、测试60，不能错配环境。"
+      },
+      {
+        "question": "10月3日为什么不能直接采用600秒作为生产 TTL？",
+        "expected": "当时截图环境不明确，只是线索；10月7日才澄清为staging。"
+      }
+    ]
+  },
+  {
+    "id": "F_multitopic_reference",
+    "description": "同scope多主题候选、近期上下文指代、检索有限候选",
+    "turns": [
+      {
+        "time": "2026-09-25T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "Neptune 项目约定如下：分析库目前是 MySQL；项目负责人是林岚；主服务端口是8123；服务时区是UTC；日志保留30天；日志不得包含访问密钥；构建使用Python3.11；接口错误返回JSON；单次导出最多50000行；日报每天9点发送；备份保留7天；界面默认中文；认证使用OIDC；工单前缀是NEP；部署区域是华东。"
+          ],
+          [
+            "assistant",
+            "已记录这些项目约定。"
+          ]
+        ]
+      },
+      {
+        "time": "2026-10-07T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "Neptune 的分析库要调整，我想听听替代建议，但暂时先别改。"
+          ],
+          [
+            "assistant",
+            "现在分析库是MySQL；针对分析任务，可以考虑ClickHouse，需要你最终确认。"
+          ]
+        ]
+      },
+      {
+        "time": "2026-10-08T10:00:00+08:00",
+        "messages": [
+          [
+            "user",
+            "好，这个项目的分析库就改成你刚才建议的那种，从2026年10月8日起执行。"
+          ],
+          [
+            "assistant",
+            "收到。"
+          ]
+        ]
+      }
+    ],
+    "queries": [
+      {
+        "question": "Neptune 当前分析库是什么？",
+        "expected": "ClickHouse；指代须由recent_context理解；应与旧MySQL状态建立替代关系。"
+      },
+      {
+        "question": "Neptune 改分析库之前用什么？",
+        "expected": "MySQL；不丢旧记录。"
+      },
+      {
+        "question": "Neptune 的日志对访问密钥有什么要求？",
+        "expected": "不得包含访问密钥，不能被库切换影响。"
+      },
+      {
+        "question": "Neptune 的单次导出行数、认证协议和备份保留期分别是什么？",
+        "expected": "50000行、OIDC、7天；观察有限top10对多项问题的候选覆盖。"
+      }
+    ]
+  }
+]

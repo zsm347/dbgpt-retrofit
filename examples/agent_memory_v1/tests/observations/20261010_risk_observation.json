@@ -1,0 +1,30 @@
+{
+  "purpose": "Focused observation of source attribution, fact-time precision, and point-in-time knowledge answers; this is failure evidence, not an accuracy benchmark.",
+  "run": {
+    "source": "temporary runner outputs from 2026-10-10",
+    "fixture": "examples/agent_memory_v1/tests/fixtures/memory_risks.json",
+    "mem0ai": "2.2.1",
+    "langmem": "0.0.30",
+    "chat_model": "qwen-plus",
+    "embedding_model": "text-embedding-v3",
+    "embedding_dimensions": 1024,
+    "main_cases": 4,
+    "main_writes": 6,
+    "main_answers": 9,
+    "time_precision_repeat_writes": 2,
+    "time_precision_repeat_answers": 2,
+    "api_write_answer_errors": 0,
+    "source_unchanged": true
+  },
+  "observations": {
+    "source_roles": "Assistant suggestions were stored separately with assistant provenance, and answers correctly said that the daily-backup suggestion was not confirmed. Tool observations were preserved as observations rather than user confirmation, although one memory grouped user, tool, and assistant source IDs.",
+    "explicit_fact_date": "The explicit 2026-10-01 migration date was written as valid_from=2026-10-01; the message receive time was not used for that fact date.",
+    "implicit_now_date": "The message '现在我在上海' had no fact date, but the manager wrote valid_from=2026-10-11, derived from observed_at. The answer then presented that inferred date as a validity boundary. This violates the intended null-on-unsupported-time rule.",
+    "point_in_time_knowledge": "After a later clarification, the stored body retained that the environment had previously been unknown, but both the intermediate and final answers used the later staging clarification when answering what was knowable on October 3. The system cannot currently reconstruct the earlier knowledge state from the updated memory alone."
+  },
+  "limits": [
+    "This is one real-model run on four synthetic cases plus one time repeat, not a general quality measurement.",
+    "The runner used vector-only candidate retrieval because optional FastEmbed/spaCy components were not installed.",
+    "The run did not modify implementation logic; it records the next concrete fixes to consider."
+  ]
+}

@@ -1,0 +1,122 @@
+[
+  {
+    "id": "V_hist_backfill_a",
+    "description": "历史回填：补录旧记录",
+    "turns": [
+      {
+        "time": "2026-10-01T10:00:00+08:00",
+        "messages": [["user", "Orion 生产主库从2026年10月1日起使用 PostgreSQL。"], ["assistant", "收到。"]]
+      },
+      {
+        "time": "2026-10-02T10:00:00+08:00",
+        "messages": [["user", "补录旧记录：Orion 在2025年6月至12月使用过 MySQL，那是过去的情况。"], ["assistant", "收到。"]]
+      }
+    ],
+    "queries": [
+      {"question": "Orion 在2025年8月使用什么生产主库？", "expected": "MySQL"},
+      {"question": "Orion 现在的生产主库是什么？", "expected": "PostgreSQL"}
+    ]
+  },
+  {
+    "id": "V_hist_backfill_b",
+    "description": "历史回填：过去曾经",
+    "turns": [
+      {
+        "time": "2026-10-01T10:00:00+08:00",
+        "messages": [["user", "Lyra 当前正式环境使用 PostgreSQL。"], ["assistant", "收到。"]]
+      },
+      {
+        "time": "2026-10-02T10:00:00+08:00",
+        "messages": [["user", "补充一条历史事实：Lyra 在2025年3月至5月期间曾经使用 MySQL，并非当前配置。"], ["assistant", "收到。"]]
+      }
+    ],
+    "queries": [
+      {"question": "Lyra 在2025年4月使用什么数据库？", "expected": "MySQL"},
+      {"question": "Lyra 目前使用什么数据库？", "expected": "PostgreSQL"}
+    ]
+  },
+  {
+    "id": "V_hist_backfill_c",
+    "description": "历史回填：较早时期",
+    "turns": [
+      {
+        "time": "2026-10-01T10:00:00+08:00",
+        "messages": [["user", "Nova 的生产数据库现在是 PostgreSQL。"], ["assistant", "收到。"]]
+      },
+      {
+        "time": "2026-10-02T10:00:00+08:00",
+        "messages": [["user", "再记一条较早时期的记录：Nova 生产库在2024年全年用的是 MySQL，和现在不是一回事。"], ["assistant", "收到。"]]
+      }
+    ],
+    "queries": [
+      {"question": "Nova 在2024年6月用的是什么生产数据库？", "expected": "MySQL"},
+      {"question": "Nova 现在的生产数据库是什么？", "expected": "PostgreSQL"}
+    ]
+  },
+  {
+    "id": "V_enrichment_a",
+    "description": "同一偏好增加表达细节",
+    "turns": [
+      {
+        "time": "2026-10-01T10:00:00+08:00",
+        "messages": [["user", "技术问题请先给结论。"], ["assistant", "收到。"]]
+      },
+      {
+        "time": "2026-10-02T10:00:00+08:00",
+        "messages": [["user", "关于技术问题，结论之后再给出具体步骤。"], ["assistant", "收到。"]]
+      }
+    ],
+    "queries": [{"question": "技术问题应该怎么回答？", "expected": "先结论，再步骤"}]
+  },
+  {
+    "id": "V_enrichment_b",
+    "description": "同一偏好换一种补充说法",
+    "turns": [
+      {
+        "time": "2026-10-01T10:00:00+08:00",
+        "messages": [["user", "回答尽量使用中文。"], ["assistant", "收到。"]]
+      },
+      {
+        "time": "2026-10-02T10:00:00+08:00",
+        "messages": [["user", "之后和我交流时请继续用中文回复。"], ["assistant", "收到。"]]
+      }
+    ],
+    "queries": [{"question": "回答语言有什么要求？", "expected": "中文"}]
+  },
+  {
+    "id": "V_state_a",
+    "description": "状态变化：位置改变",
+    "turns": [
+      {
+        "time": "2026-10-01T10:00:00+08:00",
+        "messages": [["user", "我现在在上海。"], ["assistant", "收到。"]]
+      },
+      {
+        "time": "2026-10-02T10:00:00+08:00",
+        "messages": [["user", "我现在已经回到北京了。"], ["assistant", "收到。"]]
+      }
+    ],
+    "queries": [
+      {"question": "我现在在哪里？", "expected": "北京"},
+      {"question": "之前记录的位置是什么？", "expected": "上海"}
+    ]
+  },
+  {
+    "id": "V_state_b",
+    "description": "状态变化：服务切换",
+    "turns": [
+      {
+        "time": "2026-10-01T10:00:00+08:00",
+        "messages": [["user", "Aurora 服务目前使用 Redis。"], ["assistant", "收到。"]]
+      },
+      {
+        "time": "2026-10-02T10:00:00+08:00",
+        "messages": [["user", "Aurora 服务已经切换到 Memcached 了。"], ["assistant", "收到。"]]
+      }
+    ],
+    "queries": [
+      {"question": "Aurora 服务现在使用什么缓存？", "expected": "Memcached"},
+      {"question": "Aurora 切换之前使用什么缓存？", "expected": "Redis"}
+    ]
+  }
+]

@@ -1,0 +1,33 @@
+{
+  "date": "2026-10-10",
+  "kind": "db-gpt-real-bridge-observation-round-2",
+  "model": "qwen3.8-max",
+  "embedding": "text-embedding-v3/1024",
+  "initial_observation": {
+    "inputs": [
+      "2025 年曾经使用过 Oracle",
+      "从 2026 年 10 月起使用 PostgreSQL",
+      "2025 年 6 月至 12 月使用 MySQL",
+      "考虑迁移到 ClickHouse，但尚未决定"
+    ],
+    "answers": {
+      "current": "PostgreSQL",
+      "2025-06-to-12": "MySQL",
+      "plan": "ClickHouse migration is an unconfirmed plan"
+    },
+    "problem": "The Oracle record was expanded to 2025-01-01..2025-12-31, and an answer consequently described it as a full-year fact. The source only said the user used Oracle at some unspecified time in 2025."
+  },
+  "repair": {
+    "prompt_rule": "A year mention with '曾经/用过/发生过' does not mean the fact held for the whole year; keep year precision and do not invent month/day.",
+    "rerun_input": "2025 年曾经使用过 Oracle 数据库",
+    "stored_valid_from": "2025",
+    "stored_valid_to": "2025",
+    "stored_content": "2025年曾经使用过 Oracle 数据库。这是用户于 2026-10-10 明确要求记录的历史事实，具体使用时段未指明。",
+    "answer": "2025年曾经使用过 Oracle 数据库。"
+  },
+  "limitations": [
+    "The initial round is a small synthetic scenario, not an accuracy benchmark.",
+    "The repair preserves year precision but does not infer the actual month or day.",
+    "BM25 remains disabled because fastembed is not installed; retrieval is semantic only."
+  ]
+}

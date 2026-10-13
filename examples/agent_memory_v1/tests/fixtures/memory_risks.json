@@ -1,0 +1,117 @@
+[
+  {
+    "id": "R_source_roles",
+    "description": "用户事实与 assistant 建议的来源边界",
+    "turns": [
+      {
+        "time": "2026-10-01T10:00:00+08:00",
+        "messages": [
+          ["user", "Aquila 生产数据库使用 PostgreSQL，备份频率目前还没有决定。"],
+          ["assistant", "我建议每天备份，并会按每天一次来准备方案；这只是我的建议，尚未得到确认。"]
+        ]
+      }
+    ],
+    "queries": [
+      {
+        "question": "Aquila 当前生产数据库是什么？",
+        "expected": "PostgreSQL；来源应是用户消息。"
+      },
+      {
+        "question": "Aquila 当前备份频率确定了吗？",
+        "expected": "没有确定；每天一次只是 assistant 建议，不能当成用户确认的配置。"
+      }
+    ]
+  },
+  {
+    "id": "R_tool_provenance",
+    "description": "工具观察与用户确认的区别",
+    "turns": [
+      {
+        "time": "2026-10-02T10:00:00+08:00",
+        "messages": [
+          ["user", "Beryl 生产环境的备份策略还没有确认，先做一次检查。"],
+          ["tool", "tool=backup_probe environment=production observed_policy=weekly status=success"],
+          ["assistant", "工具观察到生产环境当前配置可能是每周一次，但这不是用户确认。"]
+        ]
+      }
+    ],
+    "queries": [
+      {
+        "question": "Beryl 生产备份策略已经由用户确认了吗？",
+        "expected": "没有；工具只观察到可能是每周一次，不能冒充用户确认。"
+      },
+      {
+        "question": "Beryl 的工具检查观察到了什么？",
+        "expected": "production 环境 observed_policy=weekly、status=success；这是工具观察。"
+      }
+    ]
+  },
+  {
+    "id": "R_time_precision",
+    "description": "明确事实日期与消息观察时间的区分",
+    "turns": [
+      {
+        "time": "2026-10-10T15:30:45+08:00",
+        "messages": [
+          ["user", "2026年10月1日起，Cobalt 生产主库使用 PostgreSQL。"],
+          ["assistant", "收到。"]
+        ]
+      },
+      {
+        "time": "2026-10-11T09:20:10+08:00",
+        "messages": [
+          ["user", "现在我在上海。"],
+          ["assistant", "收到。"]
+        ]
+      }
+    ],
+    "queries": [
+      {
+        "question": "Cobalt 生产主库从什么时候开始使用 PostgreSQL？",
+        "expected": "2026-10-01；不能把消息收到时间 2026-10-10 15:30:45 当成生效时间。"
+      },
+      {
+        "question": "关于我在上海这条信息，能确定它从什么时候开始吗？",
+        "expected": "只能确定 2026-10-11 09:20:10 被观察到在上海；原文没有事实开始时间，不能把 observed_at 当 valid_from。"
+      }
+    ]
+  },
+  {
+    "id": "R_knowledge_history",
+    "description": "后来澄清后能否回答较早时系统知道什么",
+    "turns": [
+      {
+        "time": "2026-10-03T10:00:00+08:00",
+        "messages": [
+          ["user", "Dorado 截图显示 TTL 是600秒，但截图来自哪个环境还不知道；先不要据此修改生产配置。"],
+          ["assistant", "收到，600秒暂时只是环境未知的线索。"]
+        ]
+      },
+      {
+        "time": "2026-10-07T10:00:00+08:00",
+        "messages": [
+          ["user", "后来查清了，600秒截图来自 staging；生产仍是300秒。"],
+          ["assistant", "收到。"]
+        ]
+      }
+    ],
+    "intermediate": {
+      "1": [
+        {
+          "question": "在10月3日当时，600秒能直接作为 Dorado 生产 TTL 吗？",
+          "expected": "不能；当时环境未知，只能作为线索。"
+        }
+      ]
+    },
+    "queries": [
+      {
+        "question": "Dorado 现在生产和 staging 的 TTL 分别是多少？",
+        "expected": "生产300，staging600。"
+      },
+      {
+        "question": "10月3日当时为什么不能直接采用600秒？",
+        "expected": "因为当时还不知道截图来自哪个环境；10月7日才确认是 staging。不能用后来的确认改写当时的知识状态。"
+      }
+    ]
+  }
+]

@@ -1,0 +1,25 @@
+[
+  {
+    "question_id": "mini_001",
+    "question_type": "single-session-user",
+    "question": "What language should I use for technical answers?",
+    "answer": "Chinese",
+    "question_date": "2026-01-03T12:00:00+08:00",
+    "haystack_session_ids": ["session_001", "session_002"],
+    "haystack_dates": [
+      "2026-01-01T10:00:00+08:00",
+      "2026-01-02T10:00:00+08:00"
+    ],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "Technical answers should be in Chinese."},
+        {"role": "assistant", "content": "Understood."}
+      ],
+      [
+        {"role": "user", "content": "Please remember that preference."},
+        {"role": "assistant", "content": "I will."}
+      ]
+    ],
+    "answer_session_ids": ["session_001"]
+  }
+]

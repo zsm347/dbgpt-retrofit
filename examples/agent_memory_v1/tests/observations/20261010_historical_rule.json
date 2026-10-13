@@ -1,0 +1,34 @@
+{
+  "purpose": "Follow-up evidence for the explicit historical-backfill ADD rule; API completion is not a semantic accuracy score.",
+  "run": {
+    "source": "temporary runner output from 2026-10-10",
+    "mem0ai": "2.2.1",
+    "langmem": "0.0.30",
+    "chat_model": "qwen-plus",
+    "embedding_model": "text-embedding-v3",
+    "embedding_dimensions": 1024,
+    "writes": 22,
+    "answers": 23,
+    "write_errors": 0,
+    "answer_errors": 0,
+    "cases": 6
+  },
+  "change": "Raised the explicit historical/backfill ADD rule in the LangMem instructions and added the exact Atlas example.",
+  "key_observation": {
+    "before": "The 2025 MySQL backfill was patched into the current PostgreSQL memory.",
+    "after": "The 2025-06-01 through 2025-12-31 MySQL fact was added as its own memory; the PostgreSQL current-state memory was not updated.",
+    "answer": "The 2025-08 query answered MySQL without the earlier unsupported SQLite timeline claim."
+  },
+  "regression_observations": {
+    "preferences": "Repeated and supplementary preferences still used UPDATE; greeting was skipped.",
+    "state_change": "SQLite to PostgreSQL remained ADD plus old-record relation.",
+    "correction": "The 40-to-14 typo correction remained separate and answerable.",
+    "plan_and_tool": "Staging tool result and conditional production plan remained distinguishable.",
+    "multi_topic": "ClickHouse remained a plan before confirmation and a replacement after confirmation."
+  },
+  "limits": [
+    "This is one real-model run on synthetic fixtures, not a benchmark or proof of general accuracy.",
+    "The runner used vector-only candidate retrieval because optional FastEmbed/spaCy components were not installed.",
+    "Queries about what was known at an earlier point in time still need explicit provenance/history support."
+  ]
+}
