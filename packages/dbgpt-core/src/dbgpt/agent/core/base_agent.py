@@ -1442,9 +1442,18 @@ class ConversableAgent(Role, Agent):
         if memory_list:
             agent_messages.extend(memory_list)
 
-        # Multi-layer context management: compress if budget exceeded
+        # Multi-layer context management: compress if budget exceeded.
+        # In rollout mode the coordinator owns compaction (and the status
+        # channel) once the feature is enabled; the legacy layer pipeline is
+        # skipped there to avoid wasted work and misleading states. The
+        # legacy path (non-rollout) is unchanged.
         ctx_mgr: Optional[ContextManager] = getattr(self, "_context_manager", None)
-        if ctx_mgr is not None:
+        skip_legacy_compaction = (
+            rollout_history_enabled
+            and ctx_mgr is not None
+            and ctx_mgr.config.context_compaction_enabled
+        )
+        if ctx_mgr is not None and not skip_legacy_compaction:
             agent_messages = await ctx_mgr.manage_context(
                 messages=agent_messages,
                 current_round=current_retry_counter or 0,

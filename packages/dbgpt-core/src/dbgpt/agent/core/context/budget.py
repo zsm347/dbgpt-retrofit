@@ -59,6 +59,21 @@ class ContextBudgetConfig:
         turn_result_budget: int = 200_000,
         preview_size: int = 1500,
         tool_overrides: Optional[Dict[str, int]] = None,
+        # Rollout transcript compaction (Phase 0; disabled by default so the
+        # whole chain stays identical to the pre-Phase-0 behavior).
+        context_compaction_enabled: bool = False,
+        context_compaction_dry_run: bool = False,
+        proactive_prune_tokens: int = 0,
+        compact_threshold_ratio: float = 0.75,
+        # Absolute override of the compaction threshold (0 = derive from the
+        # ratio). In Phase 0 the threshold only labels the context.status
+        # state; the summary producer that consumes it lands in Phase 2.
+        compact_threshold_tokens: int = 0,
+        min_reclaim_tokens: int = 4096,
+        protect_tail_tokens: int = 20000,
+        protect_last_rounds: int = 3,
+        max_tail_rounds_floor: int = 8,
+        min_prune_chars: int = 8000,
     ):
         # `max_context_tokens <= 0` means "auto-detect from model metadata".
         # If the caller could not resolve metadata, keep the context window usable
@@ -82,6 +97,17 @@ class ContextBudgetConfig:
         self.turn_result_budget = turn_result_budget
         self.preview_size = preview_size
         self.tool_overrides: Dict[str, int] = tool_overrides or {}
+        # Rollout transcript compaction (Phase 0).
+        self.context_compaction_enabled = context_compaction_enabled
+        self.context_compaction_dry_run = context_compaction_dry_run
+        self.proactive_prune_tokens = proactive_prune_tokens
+        self.compact_threshold_ratio = compact_threshold_ratio
+        self.compact_threshold_tokens = compact_threshold_tokens
+        self.min_reclaim_tokens = min_reclaim_tokens
+        self.protect_tail_tokens = protect_tail_tokens
+        self.protect_last_rounds = protect_last_rounds
+        self.max_tail_rounds_floor = max_tail_rounds_floor
+        self.min_prune_chars = min_prune_chars
 
     @property
     def effective_budget(self) -> int:

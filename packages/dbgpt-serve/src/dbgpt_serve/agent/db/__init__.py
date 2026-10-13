@@ -14,3 +14,7 @@ from .gpts_conversations_db import (  # noqa: F401
 )
 from .gpts_messages_db import GptsMessagesDao, GptsMessagesEntity  # noqa: F401
 from .gpts_plans_db import GptsPlansDao, GptsPlansEntity  # noqa: F401
+from .rollout_compaction import (  # noqa: F401
+    CompactionOutcome,
+    maybe_compact,
+)

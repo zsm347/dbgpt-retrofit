@@ -231,6 +231,56 @@ async def _load_context_budget_config(
                 "min_keep_tokens",
                 defaults.min_keep_tokens,
             ),
+            context_compaction_enabled=_value(
+                agent_context,
+                "context_compaction_enabled",
+                defaults.context_compaction_enabled,
+            ),
+            context_compaction_dry_run=_value(
+                agent_context,
+                "context_compaction_dry_run",
+                defaults.context_compaction_dry_run,
+            ),
+            proactive_prune_tokens=_value(
+                agent_context,
+                "proactive_prune_tokens",
+                defaults.proactive_prune_tokens,
+            ),
+            compact_threshold_ratio=_value(
+                agent_context,
+                "compact_threshold_ratio",
+                defaults.compact_threshold_ratio,
+            ),
+            compact_threshold_tokens=_value(
+                agent_context,
+                "compact_threshold_tokens",
+                defaults.compact_threshold_tokens,
+            ),
+            min_reclaim_tokens=_value(
+                agent_context,
+                "min_reclaim_tokens",
+                defaults.min_reclaim_tokens,
+            ),
+            protect_tail_tokens=_value(
+                agent_context,
+                "protect_tail_tokens",
+                defaults.protect_tail_tokens,
+            ),
+            protect_last_rounds=_value(
+                agent_context,
+                "protect_last_rounds",
+                defaults.protect_last_rounds,
+            ),
+            max_tail_rounds_floor=_value(
+                agent_context,
+                "max_tail_rounds_floor",
+                defaults.max_tail_rounds_floor,
+            ),
+            min_prune_chars=_value(
+                agent_context,
+                "min_prune_chars",
+                defaults.min_prune_chars,
+            ),
         )
     except Exception:
         logger.debug(
@@ -1347,6 +1397,7 @@ async def _react_agent_stream_impl(
         ActiveTurnInProgress,
         AgentEventDao,
         AgentRolloutSession,
+        maybe_compact,
     )
     from dbgpt_serve.conversation.serve import Serve as ConversationServe
 
@@ -3163,8 +3214,44 @@ Thought/Action/Action Input format shown above.
 
     agent = await agent_builder.build()
 
+    # Wire up context-management status events into the SSE stream.
+    async def _context_status_callback(status: Dict[str, Any]) -> None:
+        await stream_queue.put({"type": "context.status", **status})
+
+    # The compaction coordinator and the legacy context manager share one
+    # budget config. The compaction window prefers the model metadata window
+    # so the F5 watermark clamp protects small windows even when the TOML
+    # window is left at its default.
+    budget_config = await _load_context_budget_config(
+        llm_client=llm_client,
+        model_name=dialogue.model_name,
+    )
+    compaction_window_tokens = budget_config.max_context_tokens
+    if budget_config.context_compaction_enabled:
+        resolved_window = await _resolve_model_context_tokens(
+            llm_client, dialogue.model_name
+        )
+        if resolved_window:
+            compaction_window_tokens = resolved_window
+
     async def _load_rollout_projection():
         await run_in_threadpool(rollout_session.assert_turn_lease)
+        if budget_config.context_compaction_enabled:
+            # F4: compaction runs inside the loader wrapper, so the current
+            # request already sees the compacted view. The coordinator
+            # returns the transcript it loaded (re-read once after a commit),
+            # keeping the normal path at a single projection load.
+            outcome = await run_in_threadpool(
+                maybe_compact,
+                rollout_session,
+                budget_config,
+                window_tokens=compaction_window_tokens,
+                dry_run=budget_config.context_compaction_dry_run,
+            )
+            if outcome.status is not None:
+                await _context_status_callback(outcome.status)
+            if outcome.projection is not None:
+                return outcome.projection
         return await run_in_threadpool(rollout_session.load_projection)
 
     async def _append_assistant_event(payload: Dict[str, Any]) -> None:
@@ -3192,15 +3279,8 @@ Thought/Action/Action Input format shown above.
     # stream_queue and stream_callback were created earlier (before ToolPack)
     # so that the question tool can use them.
 
-    # Wire up context-management status events into the SSE stream.
-    async def _context_status_callback(status: Dict[str, Any]) -> None:
-        await stream_queue.put({"type": "context.status", **status})
-
     agent.init_context_management(
-        config=await _load_context_budget_config(
-            llm_client=llm_client,
-            model_name=dialogue.model_name,
-        ),
+        config=budget_config,
         model_name=dialogue.model_name,
         on_status_event=_context_status_callback,
     )

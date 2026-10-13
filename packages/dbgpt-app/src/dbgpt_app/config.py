@@ -274,6 +274,84 @@ class AgentContextParameters(BaseParameters):
             )
         },
     )
+    context_compaction_enabled: bool = field(
+        default=False,
+        metadata={
+            "help": _(
+                "Enable rollout transcript compaction (Phase 0). Off keeps the "
+                "whole chain identical to the pre-Phase-0 behavior."
+            )
+        },
+    )
+    context_compaction_dry_run: bool = field(
+        default=False,
+        metadata={
+            "help": _(
+                "Run the compaction gates and trial prune without committing "
+                "events; emits structured context_compaction logs."
+            )
+        },
+    )
+    proactive_prune_tokens: int = field(
+        default=0,
+        metadata={
+            "help": _(
+                "Low watermark in estimated tokens that opens proactive "
+                "pruning (clamped to 40% of the context window); 0 disables."
+            )
+        },
+    )
+    compact_threshold_ratio: float = field(
+        default=0.75,
+        metadata={
+            "help": _(
+                "Compaction threshold as a fraction of the context window. "
+                "Phase 0 uses it for context.status labeling only; the Phase 2 "
+                "summary producer consumes it for triggering."
+            )
+        },
+    )
+    compact_threshold_tokens: int = field(
+        default=0,
+        metadata={
+            "help": _(
+                "Absolute compaction threshold in tokens; 0 derives it from "
+                "compact_threshold_ratio."
+            )
+        },
+    )
+    min_reclaim_tokens: int = field(
+        default=4096,
+        metadata={
+            "help": _(
+                "Minimum estimated reclaimed tokens required to commit a "
+                "compaction (cache contract)."
+            )
+        },
+    )
+    protect_tail_tokens: int = field(
+        default=20000,
+        metadata={"help": _("Estimated tokens always protected at the tail")},
+    )
+    protect_last_rounds: int = field(
+        default=3,
+        metadata={"help": _("Minimum recent turns kept uncompressed")},
+    )
+    max_tail_rounds_floor: int = field(
+        default=8,
+        metadata={
+            "help": _(
+                "Upper cap on protected tail turns (avoids the "
+                "nothing-left-to-prune deadlock)"
+            )
+        },
+    )
+    min_prune_chars: int = field(
+        default=8000,
+        metadata={
+            "help": _("Character threshold for truncating pruned tool results")
+        },
+    )
 
     def __post_init__(self):
         if self.max_context_tokens is None or self.max_context_tokens <= 0:
