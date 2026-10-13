@@ -166,7 +166,7 @@
 
 ### C4. `base_agent.py`：rollout 模式跳过 legacy `manage_context`（§2.4）
 
-`_load_thinking_messages` 在 rollout 模式下不再调用 `manage_context`（避免无效计算与误导性状态）；**legacy 路径（非 rollout）行为保持不变**。
+**跳过条件是 `context_compaction_enabled=true`**（协调器接管，含 dry-run）：`_load_thinking_messages` 在该条件下不再调用 `manage_context`（避免无效计算与误导性状态）；**flag=off 时保持现状调用**（满足 §9.2 三态表的"逐字节一致"，并保留 `context.status` 与 legacy 安全网）；legacy 路径（非 rollout）始终不变；`context.status` 在 enabled=true 时由协调器发射（§2.5），enabled=false 时仍由 legacy 发射。
 
 ### C5. 测试
 

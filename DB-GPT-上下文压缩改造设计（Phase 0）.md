@@ -123,8 +123,8 @@
 
 ### 2.4 rollout 模式下 legacy 压缩的去向
 
-- `_load_thinking_messages` 在 rollout 模式下**不再调用 legacy `manage_context`**（避免无效计算与误导性状态）；legacy 路径（非 rollout）保持不变
-- `context.status` 改由协调器发射（保持 UI 不退化）
+- **跳过条件是 `context_compaction_enabled=true`**（协调器接管后，含 dry-run）：`_load_thinking_messages` 在该条件下于 rollout 模式下**不再调用 legacy `manage_context`**（避免无效计算与误导性状态）；**flag=off 时保持现状调用**——满足"flag 关 = 零行为变化"的硬验收（含 `context.status` 与 legacy 安全网）；legacy 路径（非 rollout）始终不变
+- `context.status`：**enabled=true 时改由协调器按 §2.5 发射；enabled=false 时仍由 legacy 发射**（保持 UI 不退化）
 
 ### 2.5 `context.status` 的 state 新映射（F8）
 
@@ -179,7 +179,9 @@
 turn 数下限封顶 max_tail_rounds_floor（默认 8）——防"保护区被大输出堆满、无所可剪"死锁
 【受保护 turn 一律不可压】：① 当前 turn（I1）② 含未闭合调用（synthetic id）的 turn（F2）
                         ③ 无主段 ④ 摘要标记所在段
-可压区 = 以上保护之外、且位于第一个受保护段之后
+可压区 = 全部 turn − 尾部保护区（token/轮数）− 受保护 turn
+【逐 turn 排除，不要求连续前缀】受保护 turn 只是"不被修改"，原样保留在历史中；
+其前后的干净旧 turn 照常可压（与 §2.3"其余干净区域照常压缩"一致）
 ```
 
 ### 3.5 伪代码
