@@ -310,6 +310,7 @@ if event_type == "context_compacted":
 | 配置 | 默认 | 含义 |
 |---|---|---|
 | `context_compaction_enabled` | **false** | 总开关（灰度）；关 = 全链路与现状一致 |
+| `context_compaction_dry_run` | **false** | 灰度第一档（§10.1 步 4）：全流程运行但**不提交**（不 append 事件、投影不变），输出结构化"将压缩什么"日志；仅 `enabled=true` 时有意义 |
 | `proactive_prune_tokens` | **0**（关） | 低水位（绝对 token；参考值 ~48000，对齐 Hermes 示例）。**生效值按窗口夹紧（F5）**：`effective = min(config, window×0.4)`——否则 32k 窗口上永不触发、或触发一次后永不重新武装（rearm 超出窗口） |
 | `compact_threshold_ratio` | **0.75** | 压缩阈值（替代 70/90/95）；**可按模型覆盖**。⚠️ Phase 0 仅状态标注用途（**F9：死配置**），摘要生产者 Phase 2 接入后才消费 |
 | `compact_threshold_tokens` | 0 | 可选绝对值覆盖（0 = 不用） |
@@ -419,7 +420,7 @@ class CompactionState:
 |---|---|
 | `agent/core/rollout.py` | + `context_compacted` 到 `_SUPPORTED_EVENT_TYPES`；+ 替换分支；+ 载荷校验/转换；**+ 投影类扩展 `latest_event_seq` / `last_compaction`（F1）** |
 | `dbgpt_serve/agent/db/agent_event_db.py` | + 类型到 `_EVENT_TYPES`；+ `_validate_payload` 分支 |
-| `agent/core/context/compact.py` | 新增结构检测（turn 版）；旧 Observation 函数保留（legacy）；L1 截断逻辑复用为生产者基础 |
+| `agent/core/context/compact.py` | **本期不改**（legacy 路径与函数原样保留）；新模块参考其 L1 既有行为（跳过 `<persisted-output>`、截断文案）——结构检测在 `transcript_compaction.py` 实现 |
 | `agent/core/context/transcript_compaction.py`（新） | `detect_turns` / `select_window`（含受保护 turn） / `build_pruned_replacement` / `estimate_tokens`（纯函数） |
 | `agent/core/context/budget.py` | + 新配置字段（§5.1）+ 迁移默认 |
 | `openapi/api_v1/agentic_data_api.py` | 扩展 `_load_context_budget_config`；**在 `_load_rollout_projection` 包装内接入 `maybe_compact`（F4；`on_model_call` 仅保持 lease 断言）**；状态发射 |
