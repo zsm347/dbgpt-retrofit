@@ -34,6 +34,40 @@ from dbgpt_serve.agent.db.agent_event_db import (
 )
 
 
+def _tool_call(call_id: str, name: str = "query"):
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": '{"sql":"select 1"}'},
+    }
+
+
+def _compaction_payload(**overrides):
+    payload = {
+        "schema_version": 1,
+        "reason": "proactive",
+        "strategy": "prune",
+        "replacement_history": [
+            {"role": "human", "content": "question one"},
+            {"role": "ai", "content": "", "tool_calls": [_tool_call("c1")]},
+            {"role": "tool", "tool_call_id": "c1", "content": "pruned result"},
+            {"role": "human", "content": "question two"},
+            {"role": "ai", "content": "answer two"},
+        ],
+        "covers": {"through_event_seq": 42},
+        "accounting": {
+            "tokens_before": 1000,
+            "tokens_after": 400,
+            "reclaimed": 600,
+            "pruned_count": 1,
+        },
+        "rearm_tokens": 700,
+        "created_by": {"turn_id": "turn-1", "ts": "2026-10-13T00:00:00Z"},
+    }
+    payload.update(overrides)
+    return payload
+
+
 @pytest.fixture
 def conversation_db(tmp_path):
     if db.engine is not None:
@@ -633,3 +667,138 @@ def test_payload_uses_portable_text_with_mysql_longtext_variant():
 
     assert payload_type.dialect_impl(sqlite.dialect()).compile() == "TEXT"
     assert payload_type.dialect_impl(mysql.dialect()).compile() == "LONGTEXT"
+
+
+def test_context_compacted_event_appends_and_projects_replacement(conversation_db):
+    session = AgentRolloutSession("conv-1", str(uuid4()))
+    session.start_turn("original question")
+    session.append("assistant_message", {"content": "original answer"})
+
+    stored = session.append("context_compacted", _compaction_payload())
+
+    # turn_started, user_message, assistant_message, context_compacted.
+    assert stored.event_seq == 4
+    assert stored.payload["replacement_history"][1]["tool_calls"][0]["id"] == "c1"
+
+    projection = session.load_projection()
+
+    assert [(message.role, message.content) for message in projection.messages] == [
+        ("human", "question one"),
+        ("ai", ""),
+        ("tool", "pruned result"),
+        ("human", "question two"),
+        ("ai", "answer two"),
+    ]
+    assert projection.messages[1].tool_calls == [_tool_call("c1")]
+    assert projection.messages[2].tool_call_id == "c1"
+    assert projection.latest_event_seq == 4
+    assert projection.last_compaction is not None
+    assert projection.last_compaction.rearm_tokens == 700
+    assert projection.last_compaction.through_event_seq == 42
+    assert projection.last_compaction.accounting["reclaimed"] == 600
+    assert projection.synthetic_tool_call_ids == frozenset()
+
+
+def test_compacted_view_rebuilds_identically_after_process_restart(conversation_db):
+    session = AgentRolloutSession("conv-1", str(uuid4()))
+    session.start_turn("original question")
+    session.append("assistant_message", {"content": "original answer"})
+    session.append("context_compacted", _compaction_payload())
+
+    # A brand-new session object only replaying persisted events simulates a
+    # process restart: the compacted view must come back unchanged.
+    rebuilt = AgentRolloutSession("conv-1", str(uuid4())).load_projection()
+
+    first = session.load_projection()
+    assert rebuilt.messages == first.messages
+    assert rebuilt.synthetic_tool_call_ids == first.synthetic_tool_call_ids
+    assert rebuilt.latest_event_seq == first.latest_event_seq
+    assert rebuilt.last_compaction == first.last_compaction
+
+
+def test_later_compaction_event_supersedes_earlier_one_in_stream(conversation_db):
+    session = AgentRolloutSession("conv-1", str(uuid4()))
+    session.start_turn("original question")
+    session.append("context_compacted", _compaction_payload())
+    session.append(
+        "context_compacted",
+        _compaction_payload(
+            replacement_history=[{"role": "human", "content": "compacted v2"}],
+            covers={"through_event_seq": 88},
+            rearm_tokens=999,
+        ),
+    )
+
+    projection = session.load_projection()
+
+    assert [message.content for message in projection.messages] == ["compacted v2"]
+    assert projection.last_compaction.rearm_tokens == 999
+    assert projection.last_compaction.through_event_seq == 88
+
+
+def test_projection_without_compaction_exposes_latest_seq_and_no_state(
+    conversation_db,
+):
+    session = AgentRolloutSession("conv-1", str(uuid4()))
+    session.start_turn("hello")
+
+    projection = session.load_projection()
+
+    assert projection.latest_event_seq == 2
+    assert projection.last_compaction is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _compaction_payload(schema_version=2),
+        _compaction_payload(reason="periodic"),
+        _compaction_payload(strategy="dedupe"),
+        _compaction_payload(replacement_history=[]),
+        _compaction_payload(
+            replacement_history=[{"role": "system", "content": "system prompt"}]
+        ),
+        _compaction_payload(
+            replacement_history=[
+                {"role": "ai", "content": "", "tool_calls": "not-a-list"}
+            ]
+        ),
+        _compaction_payload(
+            replacement_history=[{"role": "tool", "content": "orphan"}]
+        ),
+        _compaction_payload(
+            replacement_history=[
+                {"role": "ai", "content": "", "tool_calls": [_tool_call("c1")]},
+                {"role": "tool", "tool_call_id": "missing", "content": "x"},
+            ]
+        ),
+        _compaction_payload(
+            replacement_history=[
+                {
+                    "role": "ai",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "query", "arguments": {}},
+                        }
+                    ],
+                }
+            ]
+        ),
+        _compaction_payload(covers=None),
+        _compaction_payload(rearm_tokens=-1),
+        _compaction_payload(accounting="not-an-object"),
+        _compaction_payload(created_by=None),
+    ],
+)
+def test_rejects_malformed_context_compacted_payloads(conversation_db, payload):
+    dao = AgentEventDao()
+
+    with pytest.raises(ValueError):
+        dao.append_event(
+            "conv-1", str(uuid4()), AgentEventDraft("context_compacted", payload)
+        )
+
+    assert dao.list_by_conv_id("conv-1") == []

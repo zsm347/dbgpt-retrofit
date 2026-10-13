@@ -37,9 +37,13 @@ _EVENT_TYPES = {
     "user_message",
     "assistant_message",
     "tool_result",
+    "context_compacted",
     "turn_completed",
     "turn_aborted",
 }
+_REPLACEMENT_ROLES = {"human", "ai", "tool"}
+_COMPACTION_REASONS = {"proactive", "threshold", "manual"}
+_COMPACTION_STRATEGIES = {"prune", "summary", "hybrid"}
 
 
 class AgentEventIdempotencyConflict(ValueError):
@@ -97,7 +101,9 @@ class StoredAgentEvent:
 
     def to_rollout_event(self) -> RolloutEvent:
         """Return the storage-independent event consumed by the projector."""
-        return RolloutEvent(event_type=self.event_type, payload=self.payload)
+        return RolloutEvent(
+            event_type=self.event_type, payload=self.payload, event_seq=self.event_seq
+        )
 
 
 class AgentEventEntity(Model):
@@ -430,6 +436,31 @@ class AgentEventDao(BaseDao):
         return event_id, event.event_type, event.schema_version, payload_json
 
     @staticmethod
+    def _validate_tool_calls(tool_calls: Any, *, descriptor: str) -> set[str]:
+        """Validate the OpenAI tool_calls shape; return the declared call ids."""
+        if not isinstance(tool_calls, list):
+            raise ValueError(f"{descriptor} 'tool_calls' must be a list")
+        call_ids: set[str] = set()
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, Mapping):
+                raise ValueError(f"each {descriptor} tool_call must be an object")
+            call_id = tool_call.get("id")
+            function = tool_call.get("function")
+            if not isinstance(call_id, str) or not call_id:
+                raise ValueError(f"each {descriptor} tool_call needs a non-empty id")
+            if call_id in call_ids:
+                raise ValueError(f"duplicate tool_call id: {call_id}")
+            if not isinstance(function, Mapping) or not isinstance(
+                function.get("name"), str
+            ):
+                raise ValueError(f"each {descriptor} tool_call needs a function name")
+            arguments = function.get("arguments")
+            if not isinstance(arguments, str):
+                raise ValueError("tool_call function arguments must be a string")
+            call_ids.add(call_id)
+        return call_ids
+
+    @staticmethod
     def _validate_payload(event_type: str, payload: Mapping[str, Any]) -> None:
         """Reject events that cannot be projected back into protocol messages."""
         if event_type == "user_message":
@@ -446,24 +477,11 @@ class AgentEventDao(BaseDao):
                 raise ValueError(
                     "assistant_message without tool_calls must contain 'content'"
                 )
-            call_ids: set[str] = set()
-            for tool_call in tool_calls:
-                if not isinstance(tool_call, Mapping):
-                    raise ValueError("each assistant tool_call must be an object")
-                call_id = tool_call.get("id")
-                function = tool_call.get("function")
-                if not isinstance(call_id, str) or not call_id:
-                    raise ValueError("each assistant tool_call needs a non-empty id")
-                if call_id in call_ids:
-                    raise ValueError(f"duplicate tool_call id: {call_id}")
-                if not isinstance(function, Mapping) or not isinstance(
-                    function.get("name"), str
-                ):
-                    raise ValueError("each assistant tool_call needs a function name")
-                arguments = function.get("arguments")
-                if not isinstance(arguments, str):
-                    raise ValueError("tool_call function arguments must be a string")
-                call_ids.add(call_id)
+            AgentEventDao._validate_tool_calls(
+                tool_calls, descriptor="assistant"
+            )
+        elif event_type == "context_compacted":
+            AgentEventDao._validate_compaction_payload(payload)
         elif event_type == "tool_result":
             if not isinstance(payload.get("tool_call_id"), str) or not payload.get(
                 "tool_call_id"
@@ -473,6 +491,82 @@ class AgentEventDao(BaseDao):
                 raise ValueError("tool_result payload must contain string 'content'")
             if "success" in payload and not isinstance(payload["success"], bool):
                 raise ValueError("tool_result 'success' must be a boolean")
+
+    @staticmethod
+    def _validate_compaction_payload(payload: Mapping[str, Any]) -> None:
+        """Validate a ``context_compacted`` event before it is written.
+
+        The replacement must be projectable as-is: allowed roles only, string
+        content, and internally closed tool-call pairing (every tool result
+        refers to an assistant call id declared inside the same replacement).
+        """
+        if payload.get("schema_version") != 1:
+            raise ValueError("context_compacted payload 'schema_version' must be 1")
+        if payload.get("reason") not in _COMPACTION_REASONS:
+            raise ValueError(
+                "context_compacted 'reason' must be proactive/threshold/manual"
+            )
+        if payload.get("strategy") not in _COMPACTION_STRATEGIES:
+            raise ValueError(
+                "context_compacted 'strategy' must be prune/summary/hybrid"
+            )
+
+        replacement = payload.get("replacement_history")
+        if not isinstance(replacement, list) or not replacement:
+            raise ValueError(
+                "context_compacted 'replacement_history' must be a non-empty list"
+            )
+        declared_call_ids: set[str] = set()
+        tool_result_ids: list[str] = []
+        for entry in replacement:
+            if not isinstance(entry, Mapping):
+                raise ValueError("each replacement_history entry must be an object")
+            role = entry.get("role")
+            if role not in _REPLACEMENT_ROLES:
+                raise ValueError("replacement_history roles must be human/ai/tool")
+            if not isinstance(entry.get("content"), str):
+                raise ValueError(
+                    "replacement_history entries must contain string 'content'"
+                )
+            if role == "ai":
+                declared_call_ids |= AgentEventDao._validate_tool_calls(
+                    entry.get("tool_calls") or [],
+                    descriptor="replacement_history",
+                )
+            elif role == "tool":
+                tool_call_id = entry.get("tool_call_id")
+                if not isinstance(tool_call_id, str) or not tool_call_id:
+                    raise ValueError(
+                        "replacement_history tool entries need a non-empty "
+                        "'tool_call_id'"
+                    )
+                tool_result_ids.append(tool_call_id)
+
+        unresolved = [
+            call_id for call_id in tool_result_ids if call_id not in declared_call_ids
+        ]
+        if unresolved:
+            raise ValueError(
+                "replacement_history tool results have no matching tool_call: "
+                + ", ".join(unresolved)
+            )
+
+        covers = payload.get("covers")
+        if not isinstance(covers, Mapping) or not isinstance(
+            covers.get("through_event_seq"), int
+        ):
+            raise ValueError(
+                "context_compacted 'covers.through_event_seq' must be an integer"
+            )
+        if not isinstance(payload.get("accounting"), Mapping):
+            raise ValueError("context_compacted 'accounting' must be an object")
+        rearm_tokens = payload.get("rearm_tokens")
+        if not isinstance(rearm_tokens, int) or rearm_tokens < 0:
+            raise ValueError(
+                "context_compacted 'rearm_tokens' must be a non-negative integer"
+            )
+        if not isinstance(payload.get("created_by"), Mapping):
+            raise ValueError("context_compacted 'created_by' must be an object")
 
     @staticmethod
     def _to_stored(row: AgentEventEntity) -> StoredAgentEvent:
