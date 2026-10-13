@@ -1,0 +1,8 @@
+# Isolated M3 environment. Fully resolved versions are in the companion lock.
+ragas==0.4.3
+# 0.4.2 removed vertexai modules still imported by ragas 0.4.3.
+langchain-community==0.4.1
+langchain-text-splitters==1.1.2
+tiktoken==0.9.0
+numpy==1.26.4
+httpx==0.28.1
