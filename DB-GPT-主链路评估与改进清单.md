@@ -856,7 +856,7 @@ DB-GPT 主链路则在 `agentic_data_api.py:2652-2812` 构造通用 `workflow_pr
 |---|---|---|
 | 触发 90%+buffer | ⚠️ 不照搬 | 触发模型将**重划**（见 Phase 0）：**弃用 DB-GPT 的 70/90/95 三档**（已定），改"低水位主动维护 + 压缩阈值（可配、可按模型覆盖）"；对齐点是"每步检查 + 中轮压缩" |
 | compaction turn 生命周期（hooks/遥测/事件） | ✅ 借鉴 | 配合 SSE 基础，把压缩变为可观测的 turn 级操作 |
-| 摘要模板（handoff 四段） | ✅ 双模板对比（已定） | 六段（DB-GPT）与四段（Codex）**都保留做 A/B**；另做"合体第三版"= 六段骨架 + Codex 的"用户约束/偏好"槽 + handoff framing + Hermes 式"已完成勿重做"声明 |
+| 摘要模板（handoff 四段） | ✅ 双模板对比（已定） | 六段（DB-GPT）与四段（Codex）**都保留做 A/B**；另做"合体第三版"= 六段骨架 + Codex 的"用户约束/偏好"槽 + handoff framing + Hermes 式"已完成勿重做"声明（路线图编号：**⑫**，Phase 2） |
 | 摘要位置（历史最后一项） | ❌ 不采纳（已定） | **与 Hermes 对齐**：摘要居中（现状 `system + [摘要] + 最近消息` 已是同形状）+ 结束标记（`_SUMMARY_END_MARKER` 等价物）+ 机器可识别元数据键（学 `_compressed_summary`） |
 | 保留用户消息预算 20k + truncate_text | ✅ 可抄 | 注意 UI 富字段兼容（D.11：steps/task_plan/generated_images 等） |
 | **权威替换（live/persisted 一致）** | ✅ **最该抄** | = compaction 事件 + 投影应用 + token 重算；根治"每轮重算"（D.6 补充 3-E 的落地形态） |
@@ -877,9 +877,9 @@ DB-GPT 主链路则在 `agentic_data_api.py:2652-2812` 构造通用 `workflow_pr
 
 **4. 路线图（Phase 0-3）**
 
-- **Phase 0 修地基（必须最先）**：① L1/L2/L3 门控重写——结构检测 + 双分派（旧文本 ReAct 走旧逻辑；`role=tool` 走新逻辑：按 `tool_call`↔`role=tool` 配对与消息计数分 round）；**同时重划触发模型：弃用 70/90/95 三档（已定），改"低水位主动维护 + 压缩阈值（可配/可按模型覆盖）"** ② 压缩事件化（新事件类型 + 两处类型集合扩展 + 投影应用规则；载荷 = 整份 replacement_history）③ 接线 P1-19 ①（窗口自适应）+ P1-23 read_file 帽；**P1-19 ② 已定暂不接线**（b3，回访条件见设计文档 §7.1 ②）
+- **Phase 0 修地基（必须最先）**：① L1/L2/L3 门控重写——结构检测 + 双分派（旧文本 ReAct 走旧逻辑；`role=tool` 走新逻辑：按 `tool_call`↔`role=tool` 配对与消息计数分 round）；**同时重划触发模型：弃用 70/90/95 三档（已定），改"低水位主动维护 + 压缩阈值（可配/可按模型覆盖）"**；**L2 归属在重写时一并定**——其"task_progress 顶替摘要"前提已失效（rollout 模式下不注入，`base_agent.py:1363`），待决：保留"整轮丢弃"（需新的进度件载体）或合并进剪枝/摘要层 ② 压缩事件化（新事件类型 + 两处类型集合扩展 + 投影应用规则；载荷 = 整份 replacement_history）③ 接线 P1-19 ①（窗口自适应）+ P1-23 read_file 帽；**P1-19 ② 已定暂不接线**（b3，回访条件见设计文档 §7.1 ②）
 - **Phase 1 无损/廉价（快速见效）**：④ 去重（投影时变换先行）⑤ L1 保留"截断 + 快照路径"（可选零成本加一行 `success` 通用元数据，不建模板）+ 保留 persisted-preview 跳过 ⑥ Pass 4 压力降级 + 消息数封顶（Pass 3 不采纳）
-- **Phase 2 权威化**：⑦ 摘要事件化提交（替代每轮重算；载荷 = 整份 replacement_history）+ token 重算 + lease 保护 + 旧摘要过滤 ⑧ 去 wire cap + 输入有界化 + trim-retry + 摘要结束标记/机器可识别元数据键
+- **Phase 2 权威化**：⑦ 摘要事件化提交（替代每轮重算；载荷 = 整份 replacement_history）+ token 重算 + lease 保护 + 旧摘要过滤 ⑧ 去 wire cap + 输入有界化 + trim-retry + 摘要结束标记/机器可识别元数据键 ⑫ **摘要模板 A/B + 合体第三版**（2026-10-13 已定、本次补编号：六段 vs 四段对比；合体版 = 六段骨架 + Codex"用户约束/偏好"槽 + handoff framing + Hermes 式"已完成勿重做"声明）
 - **Phase 3 可选激进（按需）**：⑨ 主动剪枝低水位路径（opt-in、默认关、rearm 跑道 + 回收量门；缓存契约按"有缓存"全抄）⑩ 微压缩式细水长流（`every_n_turns` 门控缓存成本）⑪ 长线：服务端压缩 / 无摘要换窗档
 
 **5. 未决 / 待核实**
