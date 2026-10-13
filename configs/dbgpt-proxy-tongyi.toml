@@ -44,7 +44,7 @@ persist_path = "pilot/data"
 # Model Configurations
 [models]
 [[models.llms]]
-name = "qwen-plus"
+name = "deepseek-v4.1-flash"
 provider = "${env:LLM_MODEL_PROVIDER:-proxy/tongyi}"
 api_base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 api_key = "${env:DASHSCOPE_API_KEY}"

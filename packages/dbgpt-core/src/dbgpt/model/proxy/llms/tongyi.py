@@ -3,7 +3,7 @@ import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, Optional, Type, Union
 
-from dbgpt.core import ModelMetadata
+from dbgpt.core import ModelMetadata, ModelRequest
 from dbgpt.core.awel.flow import (
     TAGS_ORDER_HIGH,
     ResourceCategory,
@@ -111,6 +111,26 @@ class TongyiLLMClient(OpenAILLMClient):
                 "Tongyi API requires openai>=1.0, please upgrade it by "
                 "`pip install --upgrade 'openai>=1.0'`"
             )
+
+    def _build_request(
+        self, request: ModelRequest, stream: Optional[bool] = False
+    ) -> Dict[str, Any]:
+        """Build a DashScope request with Qwen3 tool-call compatibility.
+
+        DashScope does not accept the tool-choice modes used by structured
+        extraction while Qwen3 thinking is enabled.  DB-GPT's native agent
+        sends tools through this client, so disable thinking only for Qwen3
+        requests that actually expose tools.  Plain chat requests keep the
+        provider default.  An explicit ``extra_body.enable_thinking`` passed
+        through ``openai_kwargs`` still wins.
+        """
+        payload = super()._build_request(request, stream)
+        model = (request.model or self.default_model or "").lower()
+        if model.startswith("qwen3") and request.tools:
+            extra_body = dict(payload.get("extra_body") or {})
+            extra_body.setdefault("enable_thinking", False)
+            payload["extra_body"] = extra_body
+        return payload
 
     @property
     def default_model(self) -> str:

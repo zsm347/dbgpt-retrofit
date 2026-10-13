@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Type
 
 from dbgpt._private.pydantic import BaseModel, ConfigDict, Field
 from dbgpt.core import LLMClient, ModelMetadata, ModelRequest
+from dbgpt.core.interface.message import ModelMessage, ModelMessageRoleType
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +21,29 @@ def _build_model_request(input_value: Dict) -> ModelRequest:
     Returns:
         ModelRequest: model request, pass to llm client
     """
+    messages = input_value.get("messages")
+    # AIWrapper builds OpenAI-shaped messages (``user``/``assistant``), while
+    # the internal ModelRequest/DefaultMessageConverter protocol uses
+    # ``human``/``ai``.  Normalize at this boundary so the automatic converter
+    # does not silently drop all user messages before they reach a proxy model.
+    # Keep already-normalized internal messages untouched.
+    if messages and all(isinstance(message, dict) for message in messages):
+        roles = {message.get("role") for message in messages}
+        openai_roles = {"system", "user", "assistant", "function", "tool"}
+        internal_roles = {
+            ModelMessageRoleType.SYSTEM,
+            ModelMessageRoleType.HUMAN,
+            ModelMessageRoleType.AI,
+            ModelMessageRoleType.TOOL,
+        }
+        if roles & openai_roles and not (roles - openai_roles):
+            messages = ModelMessage.from_openai_messages(messages)
+        elif roles & internal_roles and not (roles - internal_roles):
+            messages = [ModelMessage(**message) for message in messages]
+
     parm = {
         "model": input_value.get("model"),
-        "messages": input_value.get("messages"),
+        "messages": messages,
         "temperature": input_value.get("temperature", None),
         "max_new_tokens": input_value.get("max_new_tokens", None),
         "stop": input_value.get("stop", None),

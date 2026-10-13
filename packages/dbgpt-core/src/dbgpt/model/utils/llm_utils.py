@@ -101,5 +101,12 @@ def parse_model_request(
         max_new_tokens=params.get("max_new_tokens"),
         stop=params.get("stop"),
         top_p=params.get("top_p"),
+        # Preserve native tool-calling fields when a proxy adapter converts
+        # the worker payload back into a ModelRequest.  Dropping these fields
+        # makes the provider receive only the system/user messages; agents
+        # that rely on native tools then cannot call terminate or any other
+        # action even though the upstream request contained the schemas.
+        tools=params.get("tools"),
+        tool_choice=params.get("tool_choice"),
     )
     return request
