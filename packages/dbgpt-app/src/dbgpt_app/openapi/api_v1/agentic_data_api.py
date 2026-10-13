@@ -38,7 +38,10 @@ from starlette.concurrency import run_in_threadpool
 
 from dbgpt._private.config import Config
 from dbgpt._private.pydantic import BaseModel as _BaseModel
-from dbgpt.agent.core.context import ContextBudgetConfig
+from dbgpt.agent.core.context import (
+    ContextBudgetConfig,
+    tool_result_budget_for_context_window,
+)
 from dbgpt.agent.resource.tool.base import tool
 from dbgpt.agent.skill.manage import get_skill_manager
 from dbgpt.component import ComponentType
@@ -187,7 +190,7 @@ async def _load_context_budget_config(
         max_context_tokens = _value(
             agent_context, "max_context_tokens", defaults.max_context_tokens
         )
-        return ContextBudgetConfig(
+        config = ContextBudgetConfig(
             max_context_tokens=max_context_tokens,
             warning_threshold=_value(
                 agent_context, "warning_threshold", defaults.warning_threshold
@@ -233,7 +236,14 @@ async def _load_context_budget_config(
         logger.debug(
             "Failed to load agent context config; using defaults", exc_info=True
         )
-        return defaults
+        config = defaults
+    # P1-19 (1): scale the Layer 2/3 tool-result budgets to the configured
+    # context window. The fixed 100K/200K char defaults can consume a small
+    # (32K/65K token) model's entire window.
+    derived = tool_result_budget_for_context_window(config.max_context_tokens)
+    config.tool_result_threshold = derived.default_result_size
+    config.turn_result_budget = derived.turn_budget
+    return config
 
 
 def _extract_auto_data_markers(text: str) -> tuple[str, Dict[str, str]]:

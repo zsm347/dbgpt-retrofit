@@ -20,6 +20,15 @@ from typing import Annotated, Any, Dict
 
 from dbgpt.agent.resource.tool.base import tool
 
+# Hermes-aligned read bounds: a single read_file call may return at most
+# 2000 lines and ~100K characters of rendered output. Oversized reads are
+# truncated at a line boundary and the remainder is reachable via ``offset``.
+_MAX_READ_LINES = 2000
+_MAX_OUTPUT_CHARS = 100_000
+# Room kept free for the optional "use offset=... to continue" hint line so
+# the rendered content stays under the output cap even when truncated.
+_CONTINUATION_RESERVE_CHARS = 64
+
 
 def _resolve_allowed_dirs(react_state: Dict[str, Any]) -> list:
     """Return the list of directories the read_file tool may read from."""
@@ -72,15 +81,17 @@ def make_read_file(react_state: Dict[str, Any]):
             "<persisted-output> block with a file path and need to access the "
             "full content, or when you need to read an operation snapshot. "
             "Supports offset/limit for reading specific sections of large files. "
+            "Each call returns at most 2000 lines and ~100k characters; when the "
+            "output is truncated, continue with the reported offset=... value. "
             'Parameters: {"file_path": "absolute path from <persisted-output> block", '
             '"offset": "start line number, 0-based (optional, default 0)", '
-            '"limit": "max lines to read (optional, default 100)"}'
+            '"limit": "max lines to read (optional, default 100, max 2000)"}'
         ),
     )
     def read_file(
         file_path: Annotated[str, "Absolute path to the file to read"],
         offset: Annotated[int, "Start line number (0-based)"] = 0,
-        limit: Annotated[int, "Max lines to read"] = 100,
+        limit: Annotated[int, "Max lines to read (max 2000)"] = 100,
     ) -> str:
         """Read a file from disk with pagination."""
         allowed_dirs = _resolve_allowed_dirs(react_state)
@@ -131,18 +142,42 @@ def make_read_file(react_state: Dict[str, Any]):
 
         total_lines = len(lines)
         start = max(0, int(offset))
-        end = min(start + max(1, int(limit)), total_lines)
+        limit = min(max(1, int(limit)), _MAX_READ_LINES)
+        end = min(start + limit, total_lines)
         selected = lines[start:end]
 
         result_lines = [
             f"File: {file_path} ({total_lines} lines, showing {start + 1}-{end})"
         ]
+        budget = _MAX_OUTPUT_CHARS - _CONTINUATION_RESERVE_CHARS
+        used = len(result_lines[0])
+        shown = 0
         for i, line in enumerate(selected):
-            result_lines.append(f"  {start + i + 1:>4} | {line.rstrip()}")
+            rendered = f"  {start + i + 1:>4} | {line.rstrip()}"
+            if used + 1 + len(rendered) > budget:
+                break
+            result_lines.append(rendered)
+            used += 1 + len(rendered)
+            shown += 1
+        if shown == 0 and selected:
+            # A single line is larger than the whole output cap. Keep its head
+            # so the continuation offset still advances past it.
+            rendered = f"  {start + 1:>4} | {selected[0].rstrip()}"
+            head_room = budget - used - 1
+            if head_room > 0:
+                result_lines.append(rendered[:head_room])
+                shown = 1
 
-        if end < total_lines:
+        if shown != end - start:
+            result_lines[0] = (
+                f"File: {file_path} ({total_lines} lines, "
+                f"showing {start + 1}-{start + shown})"
+            )
+        next_offset = start + shown
+        if next_offset < total_lines:
             result_lines.append(
-                f"  ... ({total_lines - end} more lines, use offset={end} to continue)"
+                f"  ... ({total_lines - next_offset} more lines, "
+                f"use offset={next_offset} to continue)"
             )
 
         content = "\n".join(result_lines)

@@ -25,7 +25,11 @@ from ..util.llm.llm import LLMConfig, LLMStrategyType
 from ..util.llm.llm_client import AIWrapper
 from .action.base import Action, ActionOutput
 from .agent import Agent, AgentContext, AgentMessage, AgentReviewInfo
-from .context import ContextBudgetConfig, ContextManager
+from .context import (
+    ContextBudgetConfig,
+    ContextManager,
+    tool_result_budget_for_context_window,
+)
 from .context.manager import ContextStatusCallback
 from .memory.agent_memory import AgentMemory
 from .memory.gpts.base import GptsMessage
@@ -94,6 +98,12 @@ class ConversableAgent(Role, Agent):
                     warning_threshold=ctx.context_warning_threshold,
                     error_threshold=ctx.context_error_threshold,
                 )
+            # P1-19 (1): scale the Layer 2/3 tool-result budgets to the
+            # configured context window so small-window models are not
+            # exposed to the fixed 100K/200K char defaults.
+            derived = tool_result_budget_for_context_window(config.max_context_tokens)
+            config.tool_result_threshold = derived.default_result_size
+            config.turn_result_budget = derived.turn_budget
         llm_client = self.llm_client
         object.__setattr__(
             self,
