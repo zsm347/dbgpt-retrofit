@@ -23,15 +23,16 @@
 | 项 | 值 |
 |---|---|
 | 仓库 | `/Users/zsm/Documents/DB-GPT` |
-| HEAD | `ca9f014c` |
-| **基线 = 当前工作区** | 开工时 `git status --short` ≈ **50 项**（本轮实测：18 modified + 32 untracked；含本 Brief 与设计文档自身）——**以你开工时的实测为准**；核心是认下"18 个 M 是已落地的源码 WIP" |
-| 关键 ① | 18 个 M 含 `agentic_data_api.py` / `base_agent.py` / `agent.py` 等——**这就是"rollout 基础设施已落地"的 WIP，是你改动的出发点**（时间戳 2026-09-28 ~ 10-10，早于本次任务） |
-| 关键 ② | **你的三个目标文件里，`rollout.py`、`agent_event_db.py`、各 `tests/` 目录属于【未跟踪新文件】（在 32 个 ?? 里）**——它们是本任务的目标 WIP，正常编辑；编辑前后都显示为 `??`，属正常现象 |
+| **基线分支** | `wip/rollout-ltm-pilot-20261013`（**工作区已全部提交、clean——开工时 `git status --short` 应为 0 项**） |
+| 提交栈 | `ca9f014c`（上游基点）→ `6aaa69c7` rollout 基础设施 → `7d6ad7c1` 模型层 → `2285b596` 长期记忆 → `e1221319` 设计文档 + pilot |
+| 远程 | `origin` = `https://github.com/zsm347/dbgpt-retrofit`（**私有，你自己的，可推送**）；`upstream` = eosphoros-ai/DB-GPT（**只读参考——禁止 push**） |
+| 网络提示 | 本机 git 访问 GitHub 需走代理（gh 命令不受影响）：`git -c http.proxy=http://127.0.0.1:7897 <命令>` |
 
-**红线**：
-- ❌ 禁止 `git checkout .` / `git clean` / `git stash` / `git revert` / `git commit`——会清掉或污染已落地的 WIP
-- ❌ 不碰**其他工作流**的 WIP：未跟踪的 `docs/agent_long_term_memory_*`、`examples/agent_memory_v1/`、`packages/…/agent_memory/`、`pilot/`、`data/`、`AGENTS.md`、`.tmp_mrag_check/`；已修改的模型层文件 `llm.py` / `llm_utils.py` / `tongyi.py` / `configs/`（均与本任务无关）
-- ✅ 开工第一件事：`git status --short > /tmp/wip-before.txt`（留快照）；收工时再跑一次对比，**只应多出你的改动**
+**纪律**：
+- ✅ 开工前：`git status --short`（应为 clean）+ `git log --oneline -5`（应与上表提交栈一致）
+- ✅ 你的改动正常提交到 `wip/rollout-ltm-pilot-20261013`；**仓库未配置 git 身份** → 提交请用一次性参数：`git -c user.name=zsm347 -c user.email=zsm347@users.noreply.github.com commit -m "..."`（或先自行 `git config --local` 配置）
+- ❌ 禁止 push 到 `upstream`（只读参考）；禁止 `reset --hard` / `rebase` 既有 4 个提交；禁止删除 `.gitignore` 中新增的排除规则（`data/longmemeval/`、`.tmp_mrag_check/`、`pilot/experiments/`、`pilot/parsed/`、`pilot/.venv-rag-eval/`）
+- ❌ 不修改**其他工作流**已提交的文件（长期记忆、pilot、模型层）——除非任务明确要求
 
 ---
 
