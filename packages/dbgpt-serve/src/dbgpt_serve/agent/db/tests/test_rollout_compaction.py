@@ -167,8 +167,7 @@ def test_commit_appends_event_and_switches_the_projection(conversation_db):
     assert outcome.projection is not None
     assert outcome.projection.messages == projection.messages
     pruned = projection.messages[2].content
-    assert "[truncated, total 20000 chars]" in pruned
-    assert len(pruned) < 2000
+    assert pruned == '[query] args≈{"sql":"select 1"} · success=true · 20000 chars'
     assert projection.last_compaction is not None
     assert (
         projection.last_compaction.rearm_tokens == outcome.decision.draft.rearm_tokens
@@ -203,7 +202,7 @@ def test_second_compaction_supersedes_the_first_one(conversation_db):
     assert [event.event_type for event in events].count("context_compacted") == 2
     projection = session.load_projection()
     assert projection.messages[-1].content == "third question"
-    assert "[truncated, total 40000 chars]" in projection.messages[-2].content
+    assert "· 40000 chars" in projection.messages[-2].content
     assert (
         projection.last_compaction.through_event_seq == second.appended.event_seq - 1
     )
@@ -276,7 +275,7 @@ def test_synthetic_turn_is_protected_while_other_turns_compact(conversation_db):
     # The synthetic turn's result survived verbatim; the clean turn was pruned.
     assert "D" * 20000 in contents
     assert any(
-        "E" * 1000 in content and "[truncated, total 20000 chars]" in content
+        content.startswith("[query]") and "· 20000 chars" in content
         for content in contents
     )
     assert projection.synthetic_tool_call_ids == frozenset({"call-unknown"})
@@ -408,8 +407,8 @@ async def test_compacted_view_reaches_the_native_model_request(conversation_db):
         message for message in request_messages if message["role"] == "tool"
     ]
     assert len(tool_messages) == 1
-    assert "[truncated, total 20000 chars]" in tool_messages[0]["content"]
-    assert len(tool_messages[0]["content"]) < 2000
+    assert "· 20000 chars" in tool_messages[0]["content"]
+    assert len(tool_messages[0]["content"]) < 200
     user_messages = [
         message for message in request_messages if message["role"] == "user"
     ]

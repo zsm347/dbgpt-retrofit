@@ -46,6 +46,11 @@ WATERMARK_WINDOW_FRACTION = 0.4
 _MIN_PRUNE_CHARS = 200
 
 _TRUNCATION_MARKER_RE = re.compile(r"… \[truncated, total \d+ chars\]\s*$")
+# Aggressive one-line prune format (§2.3); the regex doubles as the
+# idempotency marker so a one-lined result is never processed twice.
+_ONE_LINE_MARKER_RE = re.compile(
+    r"^\s*\[[^\]]+\]\s+args≈.*·\s+success=(?:true|false|\?)\s+·\s+\d+ chars\s*$"
+)
 # Reference line replacing an older byte-identical tool result (§2.1). The
 # prefix doubles as the idempotency marker.
 DEDUPE_REFERENCE_PREFIX = "[duplicate of the later "
@@ -176,13 +181,45 @@ def _tool_call_info_map(messages: Sequence[Any]) -> dict[str, Tuple[str, str]]:
 def _is_processed_tool_content(content: str) -> bool:
     """True when a tool content already carries one of the producer markers.
 
-    Recognized markers (§2.3): the Phase 0 truncation suffix and the dedupe
-    reference prefix. Unmarked content is eligible for pruning and dedupe.
+    Recognized markers (§2.3): the one-line prune format, the Phase 0
+    truncation suffix and the dedupe reference prefix. Unmarked content is
+    eligible for pruning and dedupe.
     """
     return bool(
-        _TRUNCATION_MARKER_RE.search(content)
+        _ONE_LINE_MARKER_RE.search(content)
+        or _TRUNCATION_MARKER_RE.search(content)
         or content.startswith(DEDUPE_REFERENCE_PREFIX)
     )
+
+
+def render_one_line(
+    content_length: int,
+    call_id: Optional[str],
+    call_info: Mapping[str, Tuple[str, str]],
+    tool_success: Mapping[str, bool],
+    config: ContextBudgetConfig,
+) -> str:
+    """Render the aggressive one-line prune replacement (§2.3).
+
+    ``[{tool_name}] args≈{arguments preview} · success={true|false|?} · {N} chars``
+    — the name/arguments come from the same turn's tool_calls map, ``success``
+    from the projection's structured signal, and ``N`` is the replaced
+    content's original character count.
+    """
+    name, arguments = call_info.get(call_id, ("", ""))
+    name = name or "tool"
+    preview = "?"
+    if arguments:
+        preview = arguments.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+        preview = preview[: max(0, int(config.prune_args_preview_chars))]
+    success = tool_success.get(call_id)
+    if success is True:
+        success_text = "true"
+    elif success is False:
+        success_text = "false"
+    else:
+        success_text = "?"
+    return f"[{name}] args≈{preview} · success={success_text} · {content_length} chars"
 
 
 def estimate_tokens(messages: Iterable[Any]) -> int:
@@ -367,19 +404,23 @@ def build_pruned_replacement(
     window: CompactionWindow,
     config: ContextBudgetConfig,
     synthetic_ids: frozenset[str] = frozenset(),
+    tool_success: Mapping[str, bool] = {},
 ) -> Tuple[list[dict], PruneStats]:
-    """Rebuild the full transcript with old tool results pruned (§3.6).
+    """Rebuild the full transcript with old tool results pruned (§2.3/§3.6).
 
     - projection-only synthetic ("aborted") entries are dropped (I2): the
       projector re-synthesizes them from the replacement's open calls;
     - ``<persisted-output>`` blocks are kept verbatim (the file path lives in
       the block itself);
     - other over-threshold tool results inside the compressible window are
-      truncated to ``min_prune_chars`` head characters plus a
-      ``[truncated, total N chars]`` marker (no path is added);
-    - already-truncated contents are not processed twice (idempotency).
+      replaced by the aggressive one line (§2.3) when the change clears the
+      net-gain gate (``min_saving_chars``); otherwise they stay untouched;
+    - already-processed contents (one-line / Phase 0 truncation / dedupe
+      reference) are never rewritten twice (idempotency).
     """
     threshold = max(_MIN_PRUNE_CHARS, int(config.min_prune_chars))
+    min_saving = max(0, int(config.min_saving_chars))
+    call_info = _tool_call_info_map(messages)
     tokens_before = estimate_tokens(messages)
     replacement: list[dict] = []
     pruned_count = 0
@@ -409,8 +450,12 @@ def build_pruned_replacement(
             and len(content) > threshold
             and not _is_processed_tool_content(content)
         ):
-            content = f"{content[:threshold]} … [truncated, total {len(content)} chars]"
-            pruned_count += 1
+            one_line = render_one_line(
+                len(content), call_id, call_info, tool_success, config
+            )
+            if len(content) - len(one_line) >= min_saving:
+                content = one_line
+                pruned_count += 1
         replacement.append(
             {"role": "tool", "tool_call_id": call_id, "content": content}
         )
@@ -615,6 +660,7 @@ def decide_compaction(
         return rejected(gate, watermark=watermark, rearm_gate=rearm_gate)
 
     min_reclaim = int(config.min_reclaim_tokens)
+    tool_success = getattr(projection, "tool_success", None) or {}
 
     def attempt(
         compaction_window: CompactionWindow,
@@ -633,6 +679,7 @@ def decide_compaction(
             compaction_window,
             config,
             synthetic_ids=projection.synthetic_tool_call_ids,
+            tool_success=tool_success,
         )
         return replacement, stats, dedupe_count
 

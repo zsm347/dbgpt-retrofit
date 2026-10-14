@@ -346,3 +346,55 @@ def test_projection_exposes_latest_event_seq_and_last_compaction():
     payload["rearm_tokens"] = 1
     assert result.last_compaction.accounting["reclaimed"] == 600
     assert result.last_compaction.rearm_tokens == 700
+
+
+def test_projection_records_structured_tool_success():
+    events = [
+        RolloutEvent("user_message", {"content": "run both"}),
+        RolloutEvent(
+            "assistant_message",
+            {"tool_calls": [_tool_call("c1"), _tool_call("c2")]},
+        ),
+        RolloutEvent(
+            "tool_result", {"tool_call_id": "c1", "content": "ok", "success": True}
+        ),
+        RolloutEvent(
+            "tool_result", {"tool_call_id": "c2", "content": "boom", "success": False}
+        ),
+    ]
+
+    result = project_rollout_events(events)
+
+    assert result.tool_success == {"c1": True, "c2": False}
+
+
+def test_projection_ignores_non_boolean_success_values():
+    events = [
+        RolloutEvent("assistant_message", {"tool_calls": [_tool_call("c1")]}),
+        RolloutEvent(
+            "tool_result", {"tool_call_id": "c1", "content": "ok", "success": "yes"}
+        ),
+        RolloutEvent("assistant_message", {"tool_calls": [_tool_call("c2")]}),
+        RolloutEvent("tool_result", {"tool_call_id": "c2", "content": "ok"}),
+    ]
+
+    result = project_rollout_events(events)
+
+    assert result.tool_success == {}
+
+
+def test_tool_success_survives_a_context_compacted_replacement():
+    events = [
+        RolloutEvent("user_message", {"content": "q"}),
+        RolloutEvent("assistant_message", {"tool_calls": [_tool_call("c1")]}),
+        RolloutEvent(
+            "tool_result", {"tool_call_id": "c1", "content": "ok", "success": True}
+        ),
+        RolloutEvent("context_compacted", _compaction_payload()),
+    ]
+
+    result = project_rollout_events(events)
+
+    # F8: a replacement keeps call ids, so recorded outcomes stay valid and
+    # are deliberately not cleared.
+    assert result.tool_success == {"c1": True}

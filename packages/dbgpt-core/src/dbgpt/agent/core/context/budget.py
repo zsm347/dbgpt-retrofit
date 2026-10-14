@@ -75,6 +75,9 @@ class ContextBudgetConfig:
         max_tail_rounds_floor: int = 8,
         min_prune_chars: int = 8000,
         dedup_min_chars: int = 200,
+        pressure_soft_factor: float = 1.5,
+        min_saving_chars: int = 500,
+        prune_args_preview_chars: int = 80,
     ):
         # `max_context_tokens <= 0` means "auto-detect from model metadata".
         # If the caller could not resolve metadata, keep the context window usable
@@ -110,6 +113,9 @@ class ContextBudgetConfig:
         self.max_tail_rounds_floor = max_tail_rounds_floor
         self.min_prune_chars = min_prune_chars
         self.dedup_min_chars = dedup_min_chars
+        self.pressure_soft_factor = pressure_soft_factor
+        self.min_saving_chars = min_saving_chars
+        self.prune_args_preview_chars = prune_args_preview_chars
 
     @property
     def effective_budget(self) -> int:

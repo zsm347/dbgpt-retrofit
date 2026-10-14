@@ -291,6 +291,16 @@ async def _load_context_budget_config(
                 "pressure_soft_factor",
                 defaults.pressure_soft_factor,
             ),
+            min_saving_chars=_value(
+                agent_context,
+                "min_saving_chars",
+                defaults.min_saving_chars,
+            ),
+            prune_args_preview_chars=_value(
+                agent_context,
+                "prune_args_preview_chars",
+                defaults.prune_args_preview_chars,
+            ),
         )
     except Exception:
         logger.debug(

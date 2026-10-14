@@ -283,7 +283,9 @@ def test_replacement_truncates_windowed_results_and_keeps_persisted_blocks():
         for entry in replacement
         if entry["role"] == "tool"
     }
-    assert by_call["a"] == f"{big[:1000]} … [truncated, total 5000 chars]"
+    assert by_call["a"] == (
+        '[query] args≈{"sql":"select 1"} · success=? · 5000 chars'
+    )
     assert by_call["b"].startswith("<persisted-output>")
     assert by_call["c"] == "small result"
     assert by_call["d"] == "D" * 5000  # protected tail turn
@@ -475,7 +477,9 @@ def test_trigger_commits_a_draft_with_rearm_and_accounting():
     assert draft.rearm_tokens == draft.accounting["tokens_after"] + max(
         draft.accounting["reclaimed"], decision.watermark, 100
     )
-    assert "[truncated, total 20000 chars]" in draft.replacement_history[2]["content"]
+    assert draft.replacement_history[2]["content"] == (
+        '[query] args≈{"sql":"select 1"} · success=? · 20000 chars'
+    )
 
 
 def test_status_state_mapping_and_threshold_resolution():
@@ -589,8 +593,8 @@ def test_dedupe_skips_when_the_kept_copy_would_be_pruned():
     # Both copies then reach the pruner instead (no lie, no reference).
     pruned, stats = build_pruned_replacement(entries, window, config)
     assert stats.pruned_count == 2
-    assert "[truncated, total 3000 chars]" in pruned[2]["content"]
-    assert "[truncated, total 3000 chars]" in pruned[5]["content"]
+    assert "· 3000 chars" in pruned[2]["content"]
+    assert "· 3000 chars" in pruned[5]["content"]
 
 
 def test_dedupe_ignores_contents_below_the_minimum_length():
@@ -732,10 +736,7 @@ def test_pressure_relief_triggers_on_deadlock_shaped_transcript():
     assert decision.gate == "pressure"
     assert decision.pressure_stage == "A"
     assert decision.should_compact
-    assert (
-        "[truncated, total 20000 chars]"
-        in decision.draft.replacement_history[2]["content"]
-    )
+    assert "· 20000 chars" in decision.draft.replacement_history[2]["content"]
 
 
 def test_pressure_stage_b_reaches_current_turn_tools_except_the_newest():
@@ -767,7 +768,7 @@ def test_pressure_stage_b_reaches_current_turn_tools_except_the_newest():
     assert decision.gate == "pressure"
     assert decision.pressure_stage == "B"
     replacement = decision.draft.replacement_history
-    assert "[truncated, total 20000 chars]" in replacement[5]["content"]
+    assert "· 20000 chars" in replacement[5]["content"]
     assert replacement[6]["content"] == "small tail"
 
 
@@ -796,10 +797,7 @@ def test_pressure_stage_c_degrades_the_newest_tool_result_last():
     # The newest (and only current-turn) tool result is the last resort.
     assert decision.gate == "pressure"
     assert decision.pressure_stage == "C"
-    assert (
-        "[truncated, total 20000 chars]"
-        in decision.draft.replacement_history[5]["content"]
-    )
+    assert "· 20000 chars" in decision.draft.replacement_history[5]["content"]
 
 
 def test_pressure_respects_hard_lines_even_at_stage_c():
@@ -837,7 +835,7 @@ def test_pressure_respects_hard_lines_even_at_stage_c():
     assert replacement[2]["content"] == "D" * 20000
     assert replacement[5]["content"] == persisted
     # Only the plain current-turn result is degraded.
-    assert "[truncated, total 20000 chars]" in replacement[8]["content"]
+    assert "· 20000 chars" in replacement[8]["content"]
 
 
 def test_pressure_still_requires_the_reclaim_gate():
@@ -864,3 +862,128 @@ def test_pressure_still_requires_the_reclaim_gate():
     assert decision.pressure_stage is None
     assert not decision.should_compact
     assert decision.would_reclaim > 0
+
+
+# ---------------------------------------------------------------------------
+# One-line prune format (§2.3)
+# ---------------------------------------------------------------------------
+
+
+def test_one_line_format_uses_name_args_success_and_size():
+    big = "Z" * 3000
+    messages = [
+        _human("t1"),
+        _ai("", [_call("a1")]),
+        _tool("a1", big),
+        _human("cur"),
+        _ai("done"),
+    ]
+    config = _config(protect_last_rounds=1, min_prune_chars=1000)
+    window = select_window(messages, config)
+
+    replacement, stats = build_pruned_replacement(
+        messages, window, config, tool_success={"a1": True}
+    )
+
+    assert stats.pruned_count == 1
+    assert replacement[2]["content"] == (
+        '[query] args≈{"sql":"select 1"} · success=true · 3000 chars'
+    )
+
+
+def test_one_line_marks_missing_signals_with_question_marks():
+    big = "Z" * 3000
+    # No matching assistant tool_call -> name/arguments unknown; no success
+    # signal in the projection.
+    messages = [_human("t1"), _tool("ghost", big), _human("cur"), _ai("done")]
+    config = _config(protect_last_rounds=1, min_prune_chars=1000)
+    window = select_window(messages, config)
+
+    replacement, stats = build_pruned_replacement(
+        messages, window, config, tool_success={"ghost": False}
+    )
+
+    assert stats.pruned_count == 1
+    assert replacement[1]["content"] == "[tool] args≈? · success=false · 3000 chars"
+
+
+def test_one_line_replaces_argument_newlines_and_caps_the_preview():
+    big = "Z" * 3000
+    call = {
+        "id": "a1",
+        "type": "function",
+        "function": {
+            "name": "query",
+            "arguments": '{"a": 1,\n "b": 2,\n "c": "' + "x" * 200 + '"}',
+        },
+    }
+    messages = [
+        _human("t1"),
+        _ai("", [call]),
+        _tool("a1", big),
+        _human("cur"),
+        _ai("done"),
+    ]
+    config = _config(
+        protect_last_rounds=1, min_prune_chars=1000, prune_args_preview_chars=80
+    )
+    window = select_window(messages, config)
+
+    replacement, stats = build_pruned_replacement(messages, window, config)
+
+    line = replacement[2]["content"]
+    assert stats.pruned_count == 1
+    assert "\n" not in line
+    # Newlines become spaces (kept verbatim otherwise), preview capped at 80.
+    expected_preview = call["function"]["arguments"].replace("\n", " ")[:80]
+    assert line == f"[query] args≈{expected_preview} · success=? · 3000 chars"
+    assert len(expected_preview) == 80
+
+
+def test_one_line_net_gain_gate_keeps_small_results():
+    content = "Z" * 300  # over min_prune_chars (200) but the gain is tiny
+    messages = [
+        _human("t1"),
+        _ai("", [_call("a1")]),
+        _tool("a1", content),
+        _human("cur"),
+        _ai("done"),
+    ]
+    config = _config(protect_last_rounds=1, min_prune_chars=200)
+    window = select_window(messages, config)
+
+    replacement, stats = build_pruned_replacement(messages, window, config)
+
+    # 300 - ~58 < min_saving_chars (500): the result stays as-is.
+    assert stats.pruned_count == 0
+    assert replacement[2]["content"] == content
+
+
+def test_already_processed_contents_are_never_rewritten():
+    already = [
+        '[query] args≈{"sql":"select 1"} · success=? · 3000 chars',
+        "Z" * 1000 + " … [truncated, total 3000 chars]",
+        "[duplicate of the later query result — content omitted]",
+    ]
+    messages = []
+    for index, content in enumerate(already):
+        messages.extend(
+            [
+                _human(f"t{index}"),
+                _ai("", [_call(f"c{index}")]),
+                _tool(f"c{index}", content),
+            ]
+        )
+    messages.extend([_human("cur"), _ai("done")])
+    config = _config(protect_last_rounds=1, min_prune_chars=1000)
+    window = select_window(messages, config)
+
+    replacement, stats = build_pruned_replacement(messages, window, config)
+
+    assert stats.pruned_count == 0
+    rewritten = [
+        replacement[2]["content"],
+        replacement[5]["content"],
+        replacement[8]["content"],
+    ]
+    assert rewritten == already

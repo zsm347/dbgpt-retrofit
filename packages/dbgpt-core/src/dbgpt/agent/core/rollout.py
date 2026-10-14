@@ -74,13 +74,16 @@ class ChatCompletionHistoryProjection:
     ``latest_event_seq`` is the last commit-order sequence observed across the
     projected events (``None`` when the input carries no sequences).
     ``last_compaction`` describes the most recent ``context_compacted`` event
-    (``None`` when the stream has never been compacted).
+    (``None`` when the stream has never been compacted). ``tool_success``
+    records the structured tool-result outcome per call id; it is prompt-side
+    metadata only and never enters the protocol payload.
     """
 
     messages: Tuple[ModelMessage, ...]
     synthetic_tool_call_ids: frozenset[str]
     latest_event_seq: Optional[int] = None
     last_compaction: Optional[CompactionState] = None
+    tool_success: Mapping[str, bool] = field(default_factory=dict)
 
 
 def _replacement_from_payload(
@@ -229,6 +232,7 @@ def project_rollout_events(
     synthetic_ids: set[str] = set()
     latest_event_seq: Optional[int] = None
     last_compaction: Optional[CompactionState] = None
+    tool_success: dict[str, bool] = {}
     # Keep insertion order so unresolved calls are synthesized in the same
     # deterministic order as the assistant's original tool_calls array.
     pending_calls: dict[str, None] = {}
@@ -273,6 +277,9 @@ def project_rollout_events(
             pending_calls.clear()
             pending_calls.update((call_id, None) for call_id in open_calls)
             last_compaction = compaction_state
+            # tool_success is deliberately NOT cleared (F8): call ids survive
+            # a replacement, so the recorded outcomes stay valid; entries for
+            # ids later absorbed into a summary are harmless residue.
             continue
         if event_type == "user_message":
             if "content" not in payload:
@@ -339,6 +346,10 @@ def project_rollout_events(
         if "content" not in payload or not isinstance(payload["content"], str):
             raise ValueError("tool_result payload must contain string 'content'")
 
+        success = payload.get("success")
+        if isinstance(success, bool):
+            tool_success[call_id] = success
+
         projected.append(
             ModelMessage(
                 role=ModelMessageRoleType.TOOL,
@@ -356,4 +367,5 @@ def project_rollout_events(
         synthetic_tool_call_ids=frozenset(synthetic_ids),
         latest_event_seq=latest_event_seq,
         last_compaction=last_compaction,
+        tool_success=dict(tool_success),
     )

@@ -369,6 +369,20 @@ class AgentContextParameters(BaseParameters):
             )
         },
     )
+    min_saving_chars: int = field(
+        default=500,
+        metadata={
+            "help": _(
+                "Net characters a one-line prune must save to replace a result"
+            )
+        },
+    )
+    prune_args_preview_chars: int = field(
+        default=80,
+        metadata={
+            "help": _("Maximum tool-argument preview length in a pruned one line")
+        },
+    )
 
     def __post_init__(self):
         if self.max_context_tokens is None or self.max_context_tokens <= 0:
