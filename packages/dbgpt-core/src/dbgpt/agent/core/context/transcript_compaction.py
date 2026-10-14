@@ -1,9 +1,9 @@
-"""Structural compaction planning for rollout transcripts (Phase 0).
+"""Structural compaction planning for rollout transcripts (Phase 0 + 1/2).
 
-Pure functions only: turn detection, window selection, replacement building
-and the trigger decision. No storage or event IO happens here; the rollout
-coordinator (``dbgpt_serve.agent.db.rollout_compaction``) wires these to the
-append-only event log and the turn lease.
+Pure functions only: turn detection, window selection, dedupe, replacement
+building and the trigger decision. No storage or event IO happens here; the
+rollout coordinator (``dbgpt_serve.agent.db.rollout_compaction``) wires these
+to the append-only event log and the turn lease.
 
 Everything operates on projected ``ModelMessage`` items (role
 ``human``/``ai``/``tool``) as produced by ``dbgpt.agent.core.rollout``:
@@ -18,6 +18,7 @@ Everything operates on projected ``ModelMessage`` items (role
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -45,6 +46,9 @@ WATERMARK_WINDOW_FRACTION = 0.4
 _MIN_PRUNE_CHARS = 200
 
 _TRUNCATION_MARKER_RE = re.compile(r"… \[truncated, total \d+ chars\]\s*$")
+# Reference line replacing an older byte-identical tool result (§2.1). The
+# prefix doubles as the idempotency marker.
+DEDUPE_REFERENCE_PREFIX = "[duplicate of the later "
 
 
 @dataclass(frozen=True)
@@ -101,6 +105,7 @@ class CompactionDecision:
     rearm_gate: int
     would_reclaim: int
     would_prune_count: int
+    would_dedupe_count: int = 0
     draft: Optional[CompactionDraft] = None
 
     @property
@@ -138,6 +143,40 @@ def _tool_call_id_of(message: Any) -> Optional[str]:
     else:
         call_id = getattr(message, "tool_call_id", None)
     return call_id if isinstance(call_id, str) else None
+
+
+def _tool_call_info_map(messages: Sequence[Any]) -> dict[str, Tuple[str, str]]:
+    """Map tool_call id -> (name, arguments) from assistant messages."""
+    info: dict[str, Tuple[str, str]] = {}
+    for message in messages:
+        for tool_call in _tool_calls_of(message) or []:
+            if not isinstance(tool_call, Mapping):
+                continue
+            call_id = tool_call.get("id")
+            function = tool_call.get("function")
+            if not isinstance(call_id, str) or not call_id:
+                continue
+            name = ""
+            arguments = ""
+            if isinstance(function, Mapping):
+                raw_name = function.get("name")
+                raw_args = function.get("arguments")
+                name = raw_name if isinstance(raw_name, str) else ""
+                arguments = raw_args if isinstance(raw_args, str) else ""
+            info[call_id] = (name, arguments)
+    return info
+
+
+def _is_processed_tool_content(content: str) -> bool:
+    """True when a tool content already carries one of the producer markers.
+
+    Recognized markers (§2.3): the Phase 0 truncation suffix and the dedupe
+    reference prefix. Unmarked content is eligible for pruning and dedupe.
+    """
+    return bool(
+        _TRUNCATION_MARKER_RE.search(content)
+        or content.startswith(DEDUPE_REFERENCE_PREFIX)
+    )
 
 
 def estimate_tokens(messages: Iterable[Any]) -> int:
@@ -317,7 +356,7 @@ def build_pruned_replacement(
             index in window.compressible_indices
             and PERSISTED_OUTPUT_TAG not in content
             and len(content) > threshold
-            and not _TRUNCATION_MARKER_RE.search(content)
+            and not _is_processed_tool_content(content)
         ):
             content = f"{content[:threshold]} … [truncated, total {len(content)} chars]"
             pruned_count += 1
@@ -331,6 +370,118 @@ def build_pruned_replacement(
         pruned_count=pruned_count,
     )
     return replacement, stats
+
+
+def dedupe_replacement(
+    messages: Sequence[Any],
+    window: CompactionWindow,
+    config: ContextBudgetConfig,
+    synthetic_ids: frozenset[str] = frozenset(),
+) -> Tuple[list[dict], int]:
+    """Replace older byte-identical tool results with a reference line (§2.1).
+
+    Fully lossless: copies are matched by md5 of their exact content, the
+    newest copy always stays verbatim, and an older copy is only rewritten
+    when it sits inside the compressible window *and* the kept copy cannot be
+    pruned later (F1) — a reference into pruned content would lie. Everything
+    else is copied through unchanged; the output feeds
+    :func:`build_pruned_replacement` so dedupe and pruning share one
+    accounting.
+    """
+    min_chars = max(1, int(config.dedup_min_chars))
+    prune_threshold = max(_MIN_PRUNE_CHARS, int(config.min_prune_chars))
+    call_info = _tool_call_info_map(messages)
+
+    def _candidate_content(index: int) -> Optional[str]:
+        message = messages[index]
+        if _role_of(message) != ModelMessageRoleType.TOOL:
+            return None
+        call_id = _tool_call_id_of(message)
+        if call_id is not None and call_id in synthetic_ids:
+            return None
+        content = _content_of(message)
+        if len(content) < min_chars:
+            return None
+        # Pointer semantics: persisted blocks never participate (F8).
+        if PERSISTED_OUTPUT_TAG in content:
+            return None
+        if _is_processed_tool_content(content):
+            return None
+        return content
+
+    # Newest-first scan: the newest eligible copy of a digest is the kept one.
+    kept_copy: dict[str, int] = {}
+    for index in range(len(messages) - 1, -1, -1):
+        content = _candidate_content(index)
+        if content is None:
+            continue
+        digest = hashlib.md5(content.encode("utf-8")).hexdigest()
+        kept_copy.setdefault(digest, index)
+
+    def _kept_will_survive(index: int) -> bool:
+        # F1: only reference a keep-copy that pruning will not touch. A copy
+        # that survives via protection, via being below the prune threshold,
+        # or via being a persisted block is safe to point at.
+        message = messages[index]
+        content = _content_of(message)
+        if PERSISTED_OUTPUT_TAG in content:
+            return True
+        if index not in window.compressible_indices:
+            return True
+        return len(content) <= prune_threshold
+
+    entries: list[dict] = []
+    replaced = 0
+    for index, message in enumerate(messages):
+        role = _role_of(message)
+        content = _content_of(message)
+        if role == ModelMessageRoleType.TOOL:
+            candidate = _candidate_content(index)
+            if candidate is not None:
+                digest = hashlib.md5(candidate.encode("utf-8")).hexdigest()
+                kept_index = kept_copy.get(digest)
+                if (
+                    kept_index is not None
+                    and kept_index != index
+                    and index in window.compressible_indices
+                    and _kept_will_survive(kept_index)
+                ):
+                    tool_name = (
+                        call_info.get(_tool_call_id_of(message), ("", ""))[0] or "tool"
+                    )
+                    entries.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": _tool_call_id_of(message),
+                            "content": (
+                                f"{DEDUPE_REFERENCE_PREFIX}{tool_name} result "
+                                "— content omitted]"
+                            ),
+                        }
+                    )
+                    replaced += 1
+                    continue
+            entries.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": _tool_call_id_of(message),
+                    "content": content,
+                }
+            )
+            continue
+        if role == ModelMessageRoleType.AI:
+            entry: dict[str, Any] = {"role": "ai", "content": content}
+            tool_calls = _tool_calls_of(message)
+            if tool_calls:
+                entry["tool_calls"] = deepcopy(tool_calls)
+            entries.append(entry)
+            continue
+        if role == ModelMessageRoleType.HUMAN:
+            entries.append({"role": "human", "content": content})
+            continue
+        raise ValueError(f"unexpected role in projection: {role!r}")
+
+    return entries, replaced
 
 
 def effective_window_tokens(
@@ -418,30 +569,40 @@ def decide_compaction(
     if compaction_window.empty:
         return rejected("window_empty", watermark=watermark, rearm_gate=rearm_gate)
 
-    replacement, stats = build_pruned_replacement(
+    # Dedupe first, then prune; both share one accounting (original -> final).
+    deduped, dedupe_count = dedupe_replacement(
         projection.messages,
         compaction_window,
         config,
         synthetic_ids=projection.synthetic_tool_call_ids,
     )
-    if stats.reclaimed < int(config.min_reclaim_tokens):
+    replacement, stats = build_pruned_replacement(
+        deduped,
+        compaction_window,
+        config,
+        synthetic_ids=projection.synthetic_tool_call_ids,
+    )
+    reclaimed = est - stats.tokens_after
+    if reclaimed < int(config.min_reclaim_tokens):
         return CompactionDecision(
             gate="reclaim",
             est_tokens=est,
             watermark=watermark,
             rearm_gate=rearm_gate,
-            would_reclaim=stats.reclaimed,
+            would_reclaim=reclaimed,
             would_prune_count=stats.pruned_count,
+            would_dedupe_count=dedupe_count,
         )
 
     rearm = stats.tokens_after + max(
-        stats.reclaimed, watermark, int(config.min_reclaim_tokens)
+        reclaimed, watermark, int(config.min_reclaim_tokens)
     )
     accounting = {
-        "tokens_before": stats.tokens_before,
+        "tokens_before": est,
         "tokens_after": stats.tokens_after,
-        "reclaimed": stats.reclaimed,
+        "reclaimed": reclaimed,
         "pruned_count": stats.pruned_count,
+        "dedupe_count": dedupe_count,
     }
     draft = CompactionDraft(
         replacement_history=replacement,
@@ -454,7 +615,8 @@ def decide_compaction(
         est_tokens=est,
         watermark=watermark,
         rearm_gate=rearm_gate,
-        would_reclaim=stats.reclaimed,
+        would_reclaim=reclaimed,
         would_prune_count=stats.pruned_count,
+        would_dedupe_count=dedupe_count,
         draft=draft,
     )

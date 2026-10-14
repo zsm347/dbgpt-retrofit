@@ -1,4 +1,4 @@
-"""Tests for structural transcript compaction (Phase 0, §3/§5)."""
+"""Tests for structural transcript compaction (Phase 0 + 1/2, §3/§5/§2)."""
 
 import json
 import math
@@ -7,10 +7,12 @@ from typing import Any, Optional
 
 from dbgpt.agent.core.context.budget import ContextBudgetConfig
 from dbgpt.agent.core.context.transcript_compaction import (
+    DEDUPE_REFERENCE_PREFIX,
     build_pruned_replacement,
     compact_threshold_tokens_for,
     context_status_state,
     decide_compaction,
+    dedupe_replacement,
     detect_turns,
     estimate_tokens,
     select_window,
@@ -458,6 +460,7 @@ def test_trigger_commits_a_draft_with_rearm_and_accounting():
         "tokens_after": decision.est_tokens - decision.would_reclaim,
         "reclaimed": decision.would_reclaim,
         "pruned_count": 1,
+        "dedupe_count": 0,
     }
     assert draft.rearm_tokens == draft.accounting["tokens_after"] + max(
         draft.accounting["reclaimed"], decision.watermark, 100
@@ -476,3 +479,197 @@ def test_status_state_mapping_and_threshold_resolution():
         compact_threshold_tokens_for(_config(compact_threshold_tokens=500), 100000)
         == 500
     )
+
+
+# ---------------------------------------------------------------------------
+# Dedupe (§2.1)
+# ---------------------------------------------------------------------------
+
+
+def _dup_turn(call_id, content):
+    return [
+        _human(f"turn {call_id}"),
+        _ai("", [_call(call_id)]),
+        _tool(call_id, content),
+    ]
+
+
+def test_dedupe_replaces_older_copy_with_reference_to_the_kept_one():
+    big = "Z" * 3000
+    messages = [
+        *_dup_turn("a1", big),
+        *_dup_turn("a2", big),
+        _human("current"),
+        _ai("done"),
+    ]
+    config = _config(protect_last_rounds=2, min_prune_chars=1000)
+    window = select_window(messages, config)
+
+    entries, replaced = dedupe_replacement(messages, window, config)
+
+    assert replaced == 1
+    assert (
+        entries[2]["content"]
+        == f"{DEDUPE_REFERENCE_PREFIX}query result — content omitted]"
+    )
+    assert entries[5]["content"] == big
+
+
+def test_dedupe_keeps_only_the_newest_copy_for_multiple_duplicates():
+    big = "Z" * 3000
+    messages = [
+        *_dup_turn("a1", big),
+        *_dup_turn("a2", big),
+        *_dup_turn("a3", big),
+        _human("current"),
+        _ai("done"),
+    ]
+    config = _config(protect_last_rounds=2, min_prune_chars=1000)
+    window = select_window(messages, config)
+
+    entries, replaced = dedupe_replacement(messages, window, config)
+
+    assert replaced == 2
+    assert entries[2]["content"].startswith(DEDUPE_REFERENCE_PREFIX)
+    assert entries[5]["content"].startswith(DEDUPE_REFERENCE_PREFIX)
+    assert entries[8]["content"] == big
+
+
+def test_dedupe_never_touches_copies_inside_protected_turns():
+    big = "Z" * 3000
+    messages = [
+        *_dup_turn("a1", big),
+        *_dup_turn("a2", big),
+        *_dup_turn("a3", big),
+        _human("current"),
+        _ai("done"),
+    ]
+    config = _config(
+        protect_last_rounds=3, max_tail_rounds_floor=8, min_prune_chars=1000
+    )
+    window = select_window(messages, config)
+
+    entries, replaced = dedupe_replacement(messages, window, config)
+
+    # a2/a3 sit inside the protected tail: only the oldest copy is rewritten.
+    assert replaced == 1
+    assert entries[2]["content"].startswith(DEDUPE_REFERENCE_PREFIX)
+    assert entries[5]["content"] == big
+    assert entries[8]["content"] == big
+
+
+def test_dedupe_skips_when_the_kept_copy_would_be_pruned():
+    big = "Z" * 3000
+    messages = [
+        *_dup_turn("a1", big),
+        *_dup_turn("a2", big),
+        _human("current"),
+        _ai("done"),
+    ]
+    config = _config(protect_last_rounds=1, min_prune_chars=1000)
+    window = select_window(messages, config)
+
+    entries, replaced = dedupe_replacement(messages, window, config)
+
+    # F1: the kept copy lives in the compressible window and is big enough to
+    # be pruned -> no reference line may point at it.
+    assert replaced == 0
+    assert entries[2]["content"] == big
+    assert entries[5]["content"] == big
+    # Both copies then reach the pruner instead (no lie, no reference).
+    pruned, stats = build_pruned_replacement(entries, window, config)
+    assert stats.pruned_count == 2
+    assert "[truncated, total 3000 chars]" in pruned[2]["content"]
+    assert "[truncated, total 3000 chars]" in pruned[5]["content"]
+
+
+def test_dedupe_ignores_contents_below_the_minimum_length():
+    small = "s" * 180  # < dedup_min_chars (200)
+    messages = [
+        *_dup_turn("a1", small),
+        *_dup_turn("a2", small),
+        _human("current"),
+        _ai("done"),
+    ]
+    config = _config(protect_last_rounds=2)
+
+    entries, replaced = dedupe_replacement(
+        messages, select_window(messages, config), config
+    )
+
+    assert replaced == 0
+    assert entries[2]["content"] == small
+
+
+def test_dedupe_ignores_persisted_output_blocks():
+    block = "<persisted-output>\n" + "Z" * 3000 + "\n</persisted-output>"
+    messages = [
+        *_dup_turn("a1", block),
+        *_dup_turn("a2", block),
+        _human("current"),
+        _ai("done"),
+    ]
+    config = _config(protect_last_rounds=2)
+
+    entries, replaced = dedupe_replacement(
+        messages, select_window(messages, config), config
+    )
+
+    assert replaced == 0
+    assert entries[2]["content"] == block
+
+
+def test_dedupe_is_idempotent_on_its_own_output():
+    big = "Z" * 3000
+    messages = [
+        *_dup_turn("a1", big),
+        *_dup_turn("a2", big),
+        _human("current"),
+        _ai("done"),
+    ]
+    config = _config(protect_last_rounds=2, min_prune_chars=1000)
+    entries, replaced = dedupe_replacement(
+        messages, select_window(messages, config), config
+    )
+    assert replaced == 1
+
+    second_entries, second_replaced = dedupe_replacement(
+        entries, select_window(entries, config), config
+    )
+
+    assert second_replaced == 0
+    assert second_entries == entries
+
+
+def test_decide_compaction_accounts_dedupe_with_prune():
+    big = "Z" * 3000
+    projection = _FakeProjection(
+        messages=(
+            _human("t1"),
+            _ai("", [_call("a1")]),
+            _tool("a1", big),
+            _human("t2"),
+            _ai("", [_call("a2")]),
+            _tool("a2", big),
+            _human("current"),
+            _ai("done"),
+        ),
+        latest_event_seq=7,
+    )
+    config = _config(
+        protect_last_rounds=2, min_prune_chars=1000, min_reclaim_tokens=100
+    )
+
+    decision = decide_compaction(projection, config, 200000)
+
+    assert decision.gate == "passed"
+    assert decision.would_dedupe_count == 1
+    assert decision.would_prune_count == 0
+    draft = decision.draft
+    assert draft.accounting["dedupe_count"] == 1
+    assert draft.accounting["pruned_count"] == 0
+    assert draft.accounting["reclaimed"] > 0
+    assert draft.replacement_history[2]["content"].startswith(
+        DEDUPE_REFERENCE_PREFIX
+    )
+    assert draft.replacement_history[5]["content"] == big

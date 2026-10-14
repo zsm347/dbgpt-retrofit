@@ -10,6 +10,7 @@ import pytest
 
 from dbgpt.agent import AgentContext, AgentMessage
 from dbgpt.agent.core.context.budget import ContextBudgetConfig
+from dbgpt.agent.core.context.transcript_compaction import DEDUPE_REFERENCE_PREFIX
 from dbgpt.agent.expand.tool_calling_agent import ToolCallingReActAgent
 from dbgpt.agent.resource.tool.base import tool
 from dbgpt.agent.resource.tool.pack import ToolPack
@@ -275,6 +276,39 @@ def test_synthetic_turn_is_protected_while_other_turns_compact(conversation_db):
         for content in contents
     )
     assert projection.synthetic_tool_call_ids == frozenset({"call-unknown"})
+
+
+def test_dedupe_reference_reaches_the_committed_projection(conversation_db):
+    session = AgentRolloutSession("conv-1", str(uuid4()))
+    big = "Z" * 20000
+    session.start_turn("first question")
+    session.append(
+        "assistant_message", {"content": None, "tool_calls": [_tool_call("dup-1")]}
+    )
+    session.append(
+        "tool_result", {"tool_call_id": "dup-1", "content": big, "success": True}
+    )
+    session.append("user_message", {"content": "second question"})
+    session.append(
+        "assistant_message", {"content": None, "tool_calls": [_tool_call("dup-2")]}
+    )
+    session.append(
+        "tool_result", {"tool_call_id": "dup-2", "content": big, "success": True}
+    )
+    session.append("user_message", {"content": "third question"})
+
+    outcome = maybe_compact(
+        session, _compaction_config(protect_last_rounds=2), window_tokens=200000
+    )
+
+    assert outcome.appended is not None
+    projection = session.load_projection()
+    contents = [message.content for message in projection.messages]
+    assert f"{DEDUPE_REFERENCE_PREFIX}query result — content omitted]" in contents
+    assert big in contents  # the kept copy stays verbatim
+    payload = outcome.appended.payload
+    assert payload["accounting"]["dedupe_count"] == 1
+    assert payload["accounting"]["pruned_count"] == 0
 
 
 def test_disabled_feature_is_a_strict_no_op(conversation_db):

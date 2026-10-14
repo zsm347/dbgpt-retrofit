@@ -74,6 +74,7 @@ class ContextBudgetConfig:
         protect_last_rounds: int = 3,
         max_tail_rounds_floor: int = 8,
         min_prune_chars: int = 8000,
+        dedup_min_chars: int = 200,
     ):
         # `max_context_tokens <= 0` means "auto-detect from model metadata".
         # If the caller could not resolve metadata, keep the context window usable
@@ -108,6 +109,7 @@ class ContextBudgetConfig:
         self.protect_last_rounds = protect_last_rounds
         self.max_tail_rounds_floor = max_tail_rounds_floor
         self.min_prune_chars = min_prune_chars
+        self.dedup_min_chars = dedup_min_chars
 
     @property
     def effective_budget(self) -> int:

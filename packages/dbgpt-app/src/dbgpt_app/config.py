@@ -352,6 +352,14 @@ class AgentContextParameters(BaseParameters):
             "help": _("Character threshold for truncating pruned tool results")
         },
     )
+    dedup_min_chars: int = field(
+        default=200,
+        metadata={
+            "help": _(
+                "Minimum tool-result length that may participate in dedupe"
+            )
+        },
+    )
 
     def __post_init__(self):
         if self.max_context_tokens is None or self.max_context_tokens <= 0:

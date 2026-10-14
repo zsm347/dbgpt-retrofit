@@ -281,6 +281,11 @@ async def _load_context_budget_config(
                 "min_prune_chars",
                 defaults.min_prune_chars,
             ),
+            dedup_min_chars=_value(
+                agent_context,
+                "dedup_min_chars",
+                defaults.dedup_min_chars,
+            ),
         )
     except Exception:
         logger.debug(
