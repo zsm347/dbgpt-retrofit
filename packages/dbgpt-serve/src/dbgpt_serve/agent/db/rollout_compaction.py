@@ -88,6 +88,7 @@ def _log_event(event: str, decision: CompactionDecision, **extra: Any) -> None:
         "would_reclaim": decision.would_reclaim,
         "would_prune_count": decision.would_prune_count,
         "would_dedupe_count": decision.would_dedupe_count,
+        "pressure_stage": decision.pressure_stage,
     }
     fields.update(extra)
     logger.info(

@@ -62,10 +62,15 @@ class Turn:
 
 @dataclass(frozen=True)
 class CompactionWindow:
-    """Turns of the transcript plus the indices open to pruning."""
+    """Turns of the transcript plus the indices open to pruning.
+
+    ``tail_tokens`` is the estimated size of the protected tail turns (F3);
+    the pressure relief trigger compares it against the soft budget.
+    """
 
     turns: Tuple[Turn, ...]
     compressible_indices: frozenset[int]
+    tail_tokens: int = 0
 
     @property
     def empty(self) -> bool:
@@ -106,6 +111,7 @@ class CompactionDecision:
     would_reclaim: int
     would_prune_count: int
     would_dedupe_count: int = 0
+    pressure_stage: Optional[str] = None
     draft: Optional[CompactionDraft] = None
 
     @property
@@ -268,8 +274,11 @@ def select_window(
     messages: Sequence[Any],
     config: ContextBudgetConfig,
     protect_ids: frozenset[str] = frozenset(),
+    pressure: bool = False,
+    *,
+    pressure_stage: str = "A",
 ) -> CompactionWindow:
-    """Choose which message indices may be pruned (§3.4).
+    """Choose which message indices may be pruned (§3.4, §2.2).
 
     The newest turns stay protected: at least ``protect_last_rounds`` turns,
     extended while their estimated size is below ``protect_tail_tokens``, and
@@ -277,6 +286,14 @@ def select_window(
     prune" deadlock when big outputs fill the tail. Turns containing
     unresolved (synthetic) calls, orphan segments and summary segments are
     additionally protected; every other turn is compressible.
+
+    ``pressure=True`` widens the window into the tail (Pass 4), stage by
+    stage (§2.2): "A" opens the tail's tool results outside the current turn,
+    "B" every tail tool result except the newest one, "C" all of them. The
+    hard line holds in every stage: only tool contents are ever degraded,
+    persisted blocks are skipped by the pruner, and orphan / synthetic turns
+    keep their protection (known limitation: a deadlock living inside such a
+    turn cannot be relieved).
     """
     turns = detect_turns(messages)
     protect_tail_tokens = max(0, int(config.protect_tail_tokens))
@@ -306,8 +323,42 @@ def select_window(
             continue
         compressible.update(turn.indices)
 
+    if pressure and turns:
+        stage = (pressure_stage or "A").upper()
+        if stage not in ("A", "B", "C"):
+            raise ValueError(f"unknown pressure stage: {pressure_stage!r}")
+        current_turn = turns[-1]
+        tail_tool_indices: list[int] = []
+        for position in sorted(tail_positions):
+            turn = turns[position]
+            if turn.is_orphan:
+                continue
+            if _turn_has_summary_marker(messages, turn):
+                continue
+            if _turn_has_protected_calls(messages, turn, protect_ids):
+                continue
+            tail_tool_indices.extend(
+                index
+                for index in turn.indices
+                if _role_of(messages[index]) == ModelMessageRoleType.TOOL
+            )
+        if stage == "A":
+            tail_tool_indices = [
+                index
+                for index in tail_tool_indices
+                if index not in current_turn.indices
+            ]
+        elif stage == "B":
+            newest_tool = max(tail_tool_indices) if tail_tool_indices else None
+            tail_tool_indices = [
+                index for index in tail_tool_indices if index != newest_tool
+            ]
+        compressible.update(tail_tool_indices)
+
     return CompactionWindow(
-        turns=tuple(turns), compressible_indices=frozenset(compressible)
+        turns=tuple(turns),
+        compressible_indices=frozenset(compressible),
+        tail_tokens=accumulated,
     )
 
 
@@ -563,60 +614,137 @@ def decide_compaction(
         gate = "rearm" if rearm_gate > watermark else "watermark"
         return rejected(gate, watermark=watermark, rearm_gate=rearm_gate)
 
-    compaction_window = select_window(
-        projection.messages, config, protect_ids=projection.synthetic_tool_call_ids
-    )
-    if compaction_window.empty:
-        return rejected("window_empty", watermark=watermark, rearm_gate=rearm_gate)
+    min_reclaim = int(config.min_reclaim_tokens)
 
-    # Dedupe first, then prune; both share one accounting (original -> final).
-    deduped, dedupe_count = dedupe_replacement(
-        projection.messages,
-        compaction_window,
-        config,
-        synthetic_ids=projection.synthetic_tool_call_ids,
-    )
-    replacement, stats = build_pruned_replacement(
-        deduped,
-        compaction_window,
-        config,
-        synthetic_ids=projection.synthetic_tool_call_ids,
-    )
-    reclaimed = est - stats.tokens_after
-    if reclaimed < int(config.min_reclaim_tokens):
+    def attempt(
+        compaction_window: CompactionWindow,
+    ) -> Optional[Tuple[list[dict], PruneStats, int]]:
+        """Trial dedupe+prune for one window (None when nothing to do)."""
+        if compaction_window.empty:
+            return None
+        deduped, dedupe_count = dedupe_replacement(
+            projection.messages,
+            compaction_window,
+            config,
+            synthetic_ids=projection.synthetic_tool_call_ids,
+        )
+        replacement, stats = build_pruned_replacement(
+            deduped,
+            compaction_window,
+            config,
+            synthetic_ids=projection.synthetic_tool_call_ids,
+        )
+        return replacement, stats, dedupe_count
+
+    def committed(
+        replacement: list[dict],
+        stats: PruneStats,
+        dedupe_count: int,
+        reclaimed: int,
+        gate: str,
+        pressure_stage: Optional[str] = None,
+    ) -> CompactionDecision:
+        rearm = stats.tokens_after + max(reclaimed, watermark, min_reclaim)
+        accounting = {
+            "tokens_before": est,
+            "tokens_after": stats.tokens_after,
+            "reclaimed": reclaimed,
+            "pruned_count": stats.pruned_count,
+            "dedupe_count": dedupe_count,
+        }
+        draft = CompactionDraft(
+            replacement_history=replacement,
+            rearm_tokens=rearm,
+            through_event_seq=getattr(projection, "latest_event_seq", None),
+            accounting=accounting,
+        )
         return CompactionDecision(
-            gate="reclaim",
+            gate=gate,
             est_tokens=est,
             watermark=watermark,
             rearm_gate=rearm_gate,
             would_reclaim=reclaimed,
             would_prune_count=stats.pruned_count,
             would_dedupe_count=dedupe_count,
+            pressure_stage=pressure_stage,
+            draft=draft,
         )
 
-    rearm = stats.tokens_after + max(
-        reclaimed, watermark, int(config.min_reclaim_tokens)
+    compaction_window = select_window(
+        projection.messages, config, protect_ids=projection.synthetic_tool_call_ids
     )
-    accounting = {
-        "tokens_before": est,
-        "tokens_after": stats.tokens_after,
-        "reclaimed": reclaimed,
-        "pruned_count": stats.pruned_count,
-        "dedupe_count": dedupe_count,
-    }
-    draft = CompactionDraft(
-        replacement_history=replacement,
-        rearm_tokens=rearm,
-        through_event_seq=getattr(projection, "latest_event_seq", None),
-        accounting=accounting,
-    )
+    normal_reclaim = 0
+    normal_pruned = 0
+    normal_deduped = 0
+    normal_gate = "reclaim"
+    trial = attempt(compaction_window)
+    if trial is None:
+        normal_gate = "window_empty"
+    else:
+        replacement, stats, dedupe_count = trial
+        normal_reclaim = est - stats.tokens_after
+        normal_pruned = stats.pruned_count
+        normal_deduped = dedupe_count
+        if normal_reclaim >= min_reclaim:
+            return committed(
+                replacement, stats, dedupe_count, normal_reclaim, gate="passed"
+            )
+
+    # Pressure relief (Pass 4, §2.2): only once the protected tail outgrows
+    # the soft budget, and only while the normal window came up short.
+    soft_budget = int(config.protect_tail_tokens * config.pressure_soft_factor)
+    if compaction_window.tail_tokens > soft_budget:
+        best: Optional[Tuple[int, int, int, list[dict], PruneStats]] = None
+        any_stage = False
+        for stage in ("A", "B", "C"):
+            stage_window = select_window(
+                projection.messages,
+                config,
+                protect_ids=projection.synthetic_tool_call_ids,
+                pressure=True,
+                pressure_stage=stage,
+            )
+            stage_trial = attempt(stage_window)
+            if stage_trial is None:
+                continue
+            any_stage = True
+            s_replacement, s_stats, s_dedupe = stage_trial
+            s_reclaimed = est - s_stats.tokens_after
+            if best is None or s_reclaimed > best[0]:
+                best = (
+                    s_reclaimed,
+                    s_stats.pruned_count,
+                    s_dedupe,
+                    s_replacement,
+                    s_stats,
+                )
+            if s_reclaimed >= min_reclaim:
+                return committed(
+                    s_replacement,
+                    s_stats,
+                    s_dedupe,
+                    s_reclaimed,
+                    gate="pressure",
+                    pressure_stage=stage,
+                )
+        if any_stage and best is not None:
+            # Relief ran but could not clear the reclaim gate either.
+            return CompactionDecision(
+                gate="pressure",
+                est_tokens=est,
+                watermark=watermark,
+                rearm_gate=rearm_gate,
+                would_reclaim=best[0],
+                would_prune_count=best[1],
+                would_dedupe_count=best[2],
+            )
+
     return CompactionDecision(
-        gate="passed",
+        gate=normal_gate,
         est_tokens=est,
         watermark=watermark,
         rearm_gate=rearm_gate,
-        would_reclaim=reclaimed,
-        would_prune_count=stats.pruned_count,
-        would_dedupe_count=dedupe_count,
-        draft=draft,
+        would_reclaim=normal_reclaim,
+        would_prune_count=normal_pruned,
+        would_dedupe_count=normal_deduped,
     )

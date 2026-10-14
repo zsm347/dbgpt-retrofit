@@ -286,6 +286,11 @@ async def _load_context_budget_config(
                 "dedup_min_chars",
                 defaults.dedup_min_chars,
             ),
+            pressure_soft_factor=_value(
+                agent_context,
+                "pressure_soft_factor",
+                defaults.pressure_soft_factor,
+            ),
         )
     except Exception:
         logger.debug(

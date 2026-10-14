@@ -132,7 +132,11 @@ def test_dry_run_logs_rejection_reasons_for_the_gate_distribution(
     ):
         outcome = maybe_compact(
             session,
-            _compaction_config(min_reclaim_tokens=10**9),
+            _compaction_config(
+                min_reclaim_tokens=10**9,
+                protect_tail_tokens=2,
+                pressure_soft_factor=1000,
+            ),
             window_tokens=200000,
             dry_run=True,
         )

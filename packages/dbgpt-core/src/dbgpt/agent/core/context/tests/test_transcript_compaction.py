@@ -439,7 +439,17 @@ def test_trigger_window_empty_when_everything_is_protected():
 def test_trigger_reclaim_gate_measures_the_trial_prune():
     projection = _big_projection()
 
-    decision = decide_compaction(projection, _config(min_reclaim_tokens=10**9), 200000)
+    # A tiny tail budget (current turn only) plus an out-of-reach trigger
+    # factor keeps the plain reclaim rejection observable.
+    decision = decide_compaction(
+        projection,
+        _config(
+            min_reclaim_tokens=10**9,
+            protect_tail_tokens=2,
+            pressure_soft_factor=1000,
+        ),
+        200000,
+    )
 
     assert decision.gate == "reclaim"
     assert decision.would_reclaim > 0
@@ -673,3 +683,184 @@ def test_decide_compaction_accounts_dedupe_with_prune():
         DEDUPE_REFERENCE_PREFIX
     )
     assert draft.replacement_history[5]["content"] == big
+
+
+# ---------------------------------------------------------------------------
+# Pressure relief (§2.2)
+# ---------------------------------------------------------------------------
+
+
+def test_select_window_reports_tail_tokens():
+    messages = []
+    for index in range(5):
+        messages.append(_human(f"q{index}"))
+        messages.append(_ai("x" * 40))
+
+    window = select_window(
+        messages, _config(protect_last_rounds=1, protect_tail_tokens=25)
+    )
+
+    # Tail scan crossed the 25-token budget with the third tail turn.
+    assert window.tail_tokens == 33
+    assert window.compressible_indices == frozenset({0, 1, 2, 3})
+
+
+def test_pressure_relief_triggers_on_deadlock_shaped_transcript():
+    big = "P" * 20000
+    projection = _FakeProjection(
+        messages=(
+            _human("t1"),
+            _ai("", [_call("a1")]),
+            _tool("a1", big),
+            _human("current"),
+            _ai("done"),
+        ),
+        latest_event_seq=5,
+    )
+    config = _config(
+        protect_last_rounds=3,
+        protect_tail_tokens=1000,
+        pressure_soft_factor=1.5,
+        min_prune_chars=1000,
+        min_reclaim_tokens=100,
+    )
+    # The normal window is empty: every turn sits inside the tail.
+    assert select_window(projection.messages, config).empty
+
+    decision = decide_compaction(projection, config, 200000)
+
+    assert decision.gate == "pressure"
+    assert decision.pressure_stage == "A"
+    assert decision.should_compact
+    assert (
+        "[truncated, total 20000 chars]"
+        in decision.draft.replacement_history[2]["content"]
+    )
+
+
+def test_pressure_stage_b_reaches_current_turn_tools_except_the_newest():
+    older = "O" * 3000
+    current_big = "C" * 20000
+    projection = _FakeProjection(
+        messages=(
+            _human("t1"),
+            _ai("", [_call("a1")]),
+            _tool("a1", older),
+            _human("current"),
+            _ai("", [_call("c2"), _call("c3")]),
+            _tool("c2", current_big),
+            _tool("c3", "small tail"),
+        ),
+        latest_event_seq=7,
+    )
+    config = _config(
+        protect_last_rounds=3,
+        protect_tail_tokens=1000,
+        min_prune_chars=1000,
+        min_reclaim_tokens=1000,
+    )
+
+    decision = decide_compaction(projection, config, 200000)
+
+    # Stage A only clears `older` (< 1000 reclaimed); stage B opens the
+    # current turn's big result while sparing the newest tool result.
+    assert decision.gate == "pressure"
+    assert decision.pressure_stage == "B"
+    replacement = decision.draft.replacement_history
+    assert "[truncated, total 20000 chars]" in replacement[5]["content"]
+    assert replacement[6]["content"] == "small tail"
+
+
+def test_pressure_stage_c_degrades_the_newest_tool_result_last():
+    older = "O" * 3000
+    projection = _FakeProjection(
+        messages=(
+            _human("t1"),
+            _ai("", [_call("a1")]),
+            _tool("a1", older),
+            _human("current"),
+            _ai("", [_call("c2")]),
+            _tool("c2", "N" * 20000),
+        ),
+        latest_event_seq=6,
+    )
+    config = _config(
+        protect_last_rounds=3,
+        protect_tail_tokens=1000,
+        min_prune_chars=1000,
+        min_reclaim_tokens=1000,
+    )
+
+    decision = decide_compaction(projection, config, 200000)
+
+    # The newest (and only current-turn) tool result is the last resort.
+    assert decision.gate == "pressure"
+    assert decision.pressure_stage == "C"
+    assert (
+        "[truncated, total 20000 chars]"
+        in decision.draft.replacement_history[5]["content"]
+    )
+
+
+def test_pressure_respects_hard_lines_even_at_stage_c():
+    persisted = "<persisted-output>\n" + "Q" * 5000 + "\n</persisted-output>"
+    projection = _FakeProjection(
+        messages=(
+            _human("t1"),
+            _ai("", [_call("done"), _call("unknown")]),
+            _tool("done", "D" * 20000),
+            _human("t2"),
+            _ai("", [_call("p1")]),
+            _tool("p1", persisted),
+            _human("current"),
+            _ai("", [_call("c2")]),
+            _tool("c2", "E" * 20000),
+        ),
+        synthetic_tool_call_ids=frozenset({"unknown"}),
+        latest_event_seq=9,
+    )
+    config = _config(
+        protect_last_rounds=3,
+        protect_tail_tokens=1000,
+        min_prune_chars=1000,
+        min_reclaim_tokens=100,
+    )
+
+    decision = decide_compaction(projection, config, 200000)
+
+    assert decision.gate == "pressure"
+    assert decision.pressure_stage == "C"
+    replacement = decision.draft.replacement_history
+    # Hard lines: the active user message, the synthetic turn's big result
+    # and the persisted pointer block all survive untouched.
+    assert replacement[6]["content"] == "current"
+    assert replacement[2]["content"] == "D" * 20000
+    assert replacement[5]["content"] == persisted
+    # Only the plain current-turn result is degraded.
+    assert "[truncated, total 20000 chars]" in replacement[8]["content"]
+
+
+def test_pressure_still_requires_the_reclaim_gate():
+    projection = _FakeProjection(
+        messages=(
+            _human("t1"),
+            _ai("", [_call("a1")]),
+            _tool("a1", "P" * 20000),
+            _human("current"),
+            _ai("done"),
+        ),
+        latest_event_seq=5,
+    )
+    config = _config(
+        protect_last_rounds=3,
+        protect_tail_tokens=1000,
+        min_prune_chars=1000,
+        min_reclaim_tokens=10**9,
+    )
+
+    decision = decide_compaction(projection, config, 200000)
+
+    assert decision.gate == "pressure"
+    assert decision.pressure_stage is None
+    assert not decision.should_compact
+    assert decision.would_reclaim > 0

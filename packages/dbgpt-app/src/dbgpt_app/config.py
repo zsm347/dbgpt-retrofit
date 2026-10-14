@@ -360,6 +360,15 @@ class AgentContextParameters(BaseParameters):
             )
         },
     )
+    pressure_soft_factor: float = field(
+        default=1.5,
+        metadata={
+            "help": _(
+                "Pressure relief opens once the protected tail exceeds "
+                "protect_tail_tokens times this factor"
+            )
+        },
+    )
 
     def __post_init__(self):
         if self.max_context_tokens is None or self.max_context_tokens <= 0:
