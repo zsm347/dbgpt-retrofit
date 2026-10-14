@@ -1,5 +1,6 @@
 """Tests for the summary producer (Phase 2, §3.3/§3.4)."""
 
+import pytest
 
 from dbgpt.agent.core.context.budget import ContextBudgetConfig
 from dbgpt.agent.core.context.transcript_compaction import (
@@ -9,11 +10,15 @@ from dbgpt.agent.core.context.transcript_compaction import (
 )
 from dbgpt.agent.core.context.transcript_summary import (
     SECTIONS6_TEMPLATE,
+    SUMMARY_END_MARKER,
     build_summary_message_content,
     build_summary_prompt,
+    is_context_overflow_error,
     serialize_region,
+    summarize_region,
 )
 from dbgpt.core.interface.message import ModelMessage
+from dbgpt.util.error_types import LLMChatError
 
 
 def _human(content="q"):
@@ -89,6 +94,17 @@ def test_summary_message_content_matches_the_legacy_prefix():
 
     assert content.startswith("[Context Summary of 7 earlier messages]\n\n")
     assert "condensed" in content
+    assert content.endswith(SUMMARY_END_MARKER)
+
+
+def test_overflow_classification_matches_text_patterns():
+    assert is_context_overflow_error(ValueError("maximum context length exceeded"))
+    assert is_context_overflow_error(ValueError("Prompt is too long"))
+    assert is_context_overflow_error(ValueError("error 413 from provider"))
+    assert is_context_overflow_error(
+        LLMChatError(original_exception=ValueError("please reduce the length"))
+    )
+    assert not is_context_overflow_error(RuntimeError("provider exploded"))
 
 
 # ---------------------------------------------------------------------------
@@ -327,3 +343,80 @@ def test_assemble_summary_draft_strips_synthetic_entries_outside_the_region():
     assert all(
         entry.get("content") != "aborted" for entry in draft.replacement_history
     )
+
+
+# ---------------------------------------------------------------------------
+# Trim-retry (§3.3/F4)
+# ---------------------------------------------------------------------------
+
+
+class _StubSummaryClient:
+    """Minimal AIWrapper-shaped stub capturing create() calls."""
+
+    def __init__(self, script=None):
+        self.calls = []
+        self.script = list(script or [])
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        action = self.script.pop(0) if self.script else "OK summary"
+        if isinstance(action, Exception):
+            raise action
+        return action
+
+
+def _trim_scenario_turns():
+    def turn(index):
+        return [
+            _human(f"turn {index} content-marker-{index}"),
+            _ai("", [_call(f"c{index}")]),
+            _tool(f"c{index}", f"result-{index}-" + "R" * 500),
+        ]
+
+    return [*turn(1), *turn(2), *turn(3)]
+
+
+@pytest.mark.asyncio
+async def test_trim_retry_trims_the_oldest_turn_and_succeeds():
+    messages = _trim_scenario_turns()
+    overflow = ValueError("maximum context length exceeded")
+    client = _StubSummaryClient(script=[overflow, "trimmed summary"])
+
+    text, llm_calls = await summarize_region(
+        messages, client, "stub-model", _config()
+    )
+
+    assert text == "trimmed summary"
+    assert llm_calls == 2
+    assert len(client.calls) == 2
+    # F7: the summary call is explicitly uncapped.
+    assert client.calls[0]["max_new_tokens"] is None
+    first_prompt = client.calls[0]["messages"][0]["content"]
+    second_prompt = client.calls[1]["messages"][0]["content"]
+    assert "content-marker-1" in first_prompt
+    assert "content-marker-1" not in second_prompt
+    assert "content-marker-2" in second_prompt
+
+
+@pytest.mark.asyncio
+async def test_trim_retry_gives_up_bounded_when_only_one_turn_remains():
+    messages = _trim_scenario_turns()
+    overflow = ValueError("prompt is too long")
+    client = _StubSummaryClient(script=[overflow, overflow, overflow])
+
+    with pytest.raises(ValueError, match="prompt is too long"):
+        await summarize_region(messages, client, "stub-model", _config())
+
+    # Three turns -> three attempts (last one on the single remaining turn).
+    assert len(client.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_non_overflow_errors_do_not_trim():
+    messages = _trim_scenario_turns()
+    client = _StubSummaryClient(script=[RuntimeError("provider exploded")])
+
+    with pytest.raises(RuntimeError, match="provider exploded"):
+        await summarize_region(messages, client, "stub-model", _config())
+
+    assert len(client.calls) == 1

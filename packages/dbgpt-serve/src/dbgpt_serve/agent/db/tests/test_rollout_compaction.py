@@ -12,6 +12,7 @@ import pytest
 from dbgpt.agent import AgentContext, AgentMessage
 from dbgpt.agent.core.context.budget import ContextBudgetConfig
 from dbgpt.agent.core.context.transcript_compaction import DEDUPE_REFERENCE_PREFIX
+from dbgpt.agent.core.context.transcript_summary import SUMMARY_END_MARKER
 from dbgpt.agent.expand.tool_calling_agent import ToolCallingReActAgent
 from dbgpt.agent.resource.tool.base import tool
 from dbgpt.agent.resource.tool.pack import ToolPack
@@ -467,6 +468,7 @@ def test_summary_strategy_commits_and_shows_a_mid_transcript_summary(conversatio
     summary_content = payload["replacement_history"][0]["content"]
     assert summary_content.startswith("[Context Summary of 3 earlier messages]\n\n")
     assert "Condensed history" in summary_content
+    assert summary_content.endswith(SUMMARY_END_MARKER)
     # The region reached the LLM in full (no truncation of the 20K result).
     prompt = summarizer.calls[0]["messages"][0]["content"]
     assert "B" * 20000 in prompt

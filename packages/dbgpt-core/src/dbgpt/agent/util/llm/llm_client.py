@@ -249,12 +249,19 @@ class AIWrapper:
         verbose: bool = False,
         stream_callback: Optional[Callable[[Dict[str, Any]], Any]] = None,
     ):
+        # Explicit ``None`` max_new_tokens means "no output cap": the request
+        # keeps None, the worker RPC drops None fields (so remote proxies
+        # never set ``max_tokens``), and the summary producer relies on this
+        # instead of a hidden default cap.
+        max_new_tokens = params.get("max_new_tokens")
         payload = {
             "model": llm_model,
             "prompt": params.get("prompt"),
             "messages": self._llm_messages_convert(params),
             "temperature": float(params.get("temperature")),
-            "max_new_tokens": int(params.get("max_new_tokens")),
+            "max_new_tokens": (
+                int(max_new_tokens) if max_new_tokens is not None else None
+            ),
             "echo": self.llm_echo,
         }
         if params.get("tools") is not None:
