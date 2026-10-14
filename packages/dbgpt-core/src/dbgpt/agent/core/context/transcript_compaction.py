@@ -41,6 +41,11 @@ SUMMARY_MARKER = "[Context Summary of"
 # then never re-arm.
 WATERMARK_WINDOW_FRACTION = 0.4
 
+# Assumed summary size as a fraction of the summarized region (Hermes budget
+# ratio, §3.2 gate 3): used only for gating and dry-run estimates; the real
+# value is measured after generation.
+_ASSUMED_SUMMARY_RATIO = 0.20
+
 # Floor for the truncation threshold ("clamp>=200" keeps summaries from being
 # re-summarized).
 _MIN_PRUNE_CHARS = 200
@@ -288,6 +293,26 @@ def _turn_tokens(messages: Sequence[Any], turn: Turn) -> int:
     return estimate_tokens(messages[index] for index in turn.indices)
 
 
+def _tail_scan(
+    messages: Sequence[Any], turns: Sequence[Turn], config: ContextBudgetConfig
+) -> Tuple[set[int], int]:
+    """Protected tail turn positions plus their estimated token size (§3.4)."""
+    protect_tail_tokens = max(0, int(config.protect_tail_tokens))
+    protect_last_rounds = max(1, int(config.protect_last_rounds))
+    max_tail_turns = max(protect_last_rounds, int(config.max_tail_rounds_floor))
+
+    tail_count = 0
+    accumulated = 0
+    for turn in reversed(turns):
+        if tail_count >= max_tail_turns:
+            break
+        if tail_count >= protect_last_rounds and accumulated >= protect_tail_tokens:
+            break
+        accumulated += _turn_tokens(messages, turn)
+        tail_count += 1
+    return set(range(len(turns) - tail_count, len(turns))), accumulated
+
+
 def _turn_has_protected_calls(
     messages: Sequence[Any], turn: Turn, protect_ids: frozenset[str]
 ) -> bool:
@@ -333,20 +358,7 @@ def select_window(
     turn cannot be relieved).
     """
     turns = detect_turns(messages)
-    protect_tail_tokens = max(0, int(config.protect_tail_tokens))
-    protect_last_rounds = max(1, int(config.protect_last_rounds))
-    max_tail_turns = max(protect_last_rounds, int(config.max_tail_rounds_floor))
-
-    tail_count = 0
-    accumulated = 0
-    for turn in reversed(turns):
-        if tail_count >= max_tail_turns:
-            break
-        if tail_count >= protect_last_rounds and accumulated >= protect_tail_tokens:
-            break
-        accumulated += _turn_tokens(messages, turn)
-        tail_count += 1
-    tail_positions = set(range(len(turns) - tail_count, len(turns)))
+    tail_positions, tail_tokens = _tail_scan(messages, turns, config)
 
     compressible: set[int] = set()
     for position, turn in enumerate(turns):
@@ -395,7 +407,7 @@ def select_window(
     return CompactionWindow(
         turns=tuple(turns),
         compressible_indices=frozenset(compressible),
-        tail_tokens=accumulated,
+        tail_tokens=tail_tokens,
     )
 
 
@@ -578,6 +590,237 @@ def dedupe_replacement(
         raise ValueError(f"unexpected role in projection: {role!r}")
 
     return entries, replaced
+
+
+@dataclass(frozen=True)
+class SummaryRegion:
+    """Contiguous absorbable prefix of the transcript (§3.3/F2)."""
+
+    start: int
+    end: int
+    region_tokens: int
+    turn_count: int
+
+    @property
+    def empty(self) -> bool:
+        return self.end <= self.start
+
+
+@dataclass(frozen=True)
+class SummaryDecision:
+    """Summary trigger-chain outcome (§3.2)."""
+
+    gate: str
+    est_tokens: int
+    watermark: int
+    rearm_gate: int
+    threshold: int
+    region_tokens: int
+    assumed_reclaim: int
+    region: Optional[SummaryRegion] = None
+
+    @property
+    def should_summarize(self) -> bool:
+        return (
+            self.gate == "passed"
+            and self.region is not None
+            and not self.region.empty
+        )
+
+
+def _copy_entry(message: Any, synthetic_ids: frozenset[str]) -> Optional[dict]:
+    """Copy one projected message into a replacement entry (None = stripped)."""
+    role = _role_of(message)
+    if role == ModelMessageRoleType.TOOL:
+        call_id = _tool_call_id_of(message)
+        if call_id is not None and call_id in synthetic_ids:
+            return None
+        return {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": _content_of(message),
+        }
+    if role == ModelMessageRoleType.AI:
+        entry: dict[str, Any] = {"role": "ai", "content": _content_of(message)}
+        tool_calls = _tool_calls_of(message)
+        if tool_calls:
+            entry["tool_calls"] = deepcopy(tool_calls)
+        return entry
+    if role == ModelMessageRoleType.HUMAN:
+        return {"role": "human", "content": _content_of(message)}
+    raise ValueError(f"unexpected role in projection: {role!r}")
+
+
+def select_summary_region(
+    messages: Sequence[Any],
+    config: ContextBudgetConfig,
+    protect_ids: frozenset[str] = frozenset(),
+) -> SummaryRegion:
+    """Pick the contiguous absorbable prefix of the transcript (F2, §3.3).
+
+    The region always starts at the oldest message and keeps extending turn by
+    turn while the turn is absorbable; it stops at the first structural
+    protection: a turn with unresolved calls, a non-summary orphan segment,
+    the current turn, or the protected tail window. Old summary segments are
+    absorbable — their text enters the new summary input and is carried away
+    with the region (iterative refresh instead of summary stacking).
+    """
+    turns = detect_turns(messages)
+    if not turns:
+        return SummaryRegion(start=0, end=0, region_tokens=0, turn_count=0)
+
+    tail_positions, _ = _tail_scan(messages, turns, config)
+    first_tail_position = min(tail_positions) if tail_positions else len(turns)
+
+    end = 0
+    absorbed = 0
+    for position, turn in enumerate(turns):
+        if position >= first_tail_position:
+            break
+        if turn.is_orphan and not _turn_has_summary_marker(messages, turn):
+            break
+        if _turn_has_protected_calls(messages, turn, protect_ids):
+            break
+        end = turn.indices[-1] + 1
+        absorbed += 1
+
+    region_tokens = estimate_tokens(messages[:end]) if end > 0 else 0
+    return SummaryRegion(
+        start=0, end=end, region_tokens=region_tokens, turn_count=absorbed
+    )
+
+
+def build_summary_replacement(
+    messages: Sequence[Any],
+    region: SummaryRegion,
+    summary_content: str,
+    synthetic_ids: frozenset[str] = frozenset(),
+) -> list[dict]:
+    """Whole-history replacement with the region spliced into a summary.
+
+    ``messages[:region.start] + [summary] + messages[region.end:]`` (§3.4);
+    everything outside the region is copied verbatim (projection-only
+    synthetic entries are stripped so the projector can rebuild them).
+    """
+    entries: list[dict] = []
+    for message in messages[: region.start]:
+        entry = _copy_entry(message, synthetic_ids)
+        if entry is not None:
+            entries.append(entry)
+    entries.append({"role": "human", "content": summary_content})
+    for message in messages[region.end :]:
+        entry = _copy_entry(message, synthetic_ids)
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def assemble_summary_draft(
+    projection: Any,
+    region: SummaryRegion,
+    summary_content: str,
+    config: ContextBudgetConfig,
+    window_tokens: Optional[int] = None,
+) -> Optional[CompactionDraft]:
+    """Real-value accounting for a summary replacement (§3.8).
+
+    Returns ``None`` when the replacement is not shorter than the replaced
+    region — such a summary must not be committed (no gain, only risk).
+    """
+    messages = projection.messages
+    synthetic_ids = getattr(projection, "synthetic_tool_call_ids", frozenset())
+    replacement = build_summary_replacement(
+        messages, region, summary_content, synthetic_ids=synthetic_ids
+    )
+    tokens_before = estimate_tokens(messages)
+    tokens_after = estimate_tokens(replacement)
+    summary_tokens = estimate_tokens([replacement[region.start]])
+    if summary_tokens >= region.region_tokens or tokens_after >= tokens_before:
+        return None
+
+    reclaimed = tokens_before - tokens_after
+    window = effective_window_tokens(config, window_tokens)
+    watermark = min(
+        int(config.proactive_prune_tokens),
+        int(window * WATERMARK_WINDOW_FRACTION),
+    )
+    rearm = tokens_after + max(reclaimed, watermark, int(config.min_reclaim_tokens))
+    accounting = {
+        "tokens_before": tokens_before,
+        "tokens_after": tokens_after,
+        "reclaimed": reclaimed,
+        "summary_chars": len(summary_content),
+    }
+    return CompactionDraft(
+        replacement_history=replacement,
+        rearm_tokens=rearm,
+        through_event_seq=getattr(projection, "latest_event_seq", None),
+        accounting=accounting,
+    )
+
+
+def decide_summary(
+    projection: Any,
+    config: ContextBudgetConfig,
+    window_tokens: Optional[int] = None,
+) -> SummaryDecision:
+    """Run the §3.2 summary trigger chain against a projection."""
+    window = effective_window_tokens(config, window_tokens)
+    est = estimate_tokens(projection.messages)
+    threshold = compact_threshold_tokens_for(config, window)
+    watermark = min(
+        int(config.proactive_prune_tokens),
+        int(window * WATERMARK_WINDOW_FRACTION),
+    )
+    last_compaction = getattr(projection, "last_compaction", None)
+    rearm_gate = (
+        int(last_compaction.rearm_tokens) if last_compaction is not None else 0
+    )
+
+    def rejected(gate: str, region: Optional[SummaryRegion] = None):
+        region_tokens = region.region_tokens if region is not None else 0
+        return SummaryDecision(
+            gate=gate,
+            est_tokens=est,
+            watermark=watermark,
+            rearm_gate=rearm_gate,
+            threshold=threshold,
+            region_tokens=region_tokens,
+            assumed_reclaim=region_tokens - int(region_tokens * _ASSUMED_SUMMARY_RATIO),
+            region=region,
+        )
+
+    if not config.context_compaction_enabled:
+        return rejected("disabled")
+    if est < threshold:
+        return rejected("threshold")
+    if est < max(watermark, rearm_gate):
+        gate = "rearm" if rearm_gate > watermark else "watermark"
+        return rejected(gate)
+
+    region = select_summary_region(
+        projection.messages,
+        config,
+        protect_ids=getattr(projection, "synthetic_tool_call_ids", frozenset()),
+    )
+    if region.empty:
+        return rejected("region_empty", region)
+    assumed_reclaim = region.region_tokens - int(
+        region.region_tokens * _ASSUMED_SUMMARY_RATIO
+    )
+    if assumed_reclaim < int(config.min_reclaim_tokens):
+        return rejected("reclaim", region)
+
+    return SummaryDecision(
+        gate="passed",
+        est_tokens=est,
+        watermark=watermark,
+        rearm_gate=rearm_gate,
+        threshold=threshold,
+        region_tokens=region.region_tokens,
+        assumed_reclaim=assumed_reclaim,
+        region=region,
+    )
 
 
 def effective_window_tokens(

@@ -383,6 +383,24 @@ class AgentContextParameters(BaseParameters):
             "help": _("Maximum tool-argument preview length in a pruned one line")
         },
     )
+    summary_trim_max_attempts: int = field(
+        default=8,
+        metadata={
+            "help": _(
+                "Retry budget for no-progress trim retries on summary overflow"
+            )
+        },
+    )
+    summary_failure_threshold: int = field(
+        default=3,
+        metadata={
+            "help": _("Consecutive summary failures before the cooldown opens")
+        },
+    )
+    summary_cooldown_seconds: int = field(
+        default=60,
+        metadata={"help": _("Summary failure cooldown duration in seconds")},
+    )
 
     def __post_init__(self):
         if self.max_context_tokens is None or self.max_context_tokens <= 0:

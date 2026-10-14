@@ -301,6 +301,21 @@ async def _load_context_budget_config(
                 "prune_args_preview_chars",
                 defaults.prune_args_preview_chars,
             ),
+            summary_trim_max_attempts=_value(
+                agent_context,
+                "summary_trim_max_attempts",
+                defaults.summary_trim_max_attempts,
+            ),
+            summary_failure_threshold=_value(
+                agent_context,
+                "summary_failure_threshold",
+                defaults.summary_failure_threshold,
+            ),
+            summary_cooldown_seconds=_value(
+                agent_context,
+                "summary_cooldown_seconds",
+                defaults.summary_cooldown_seconds,
+            ),
         )
     except Exception:
         logger.debug(
@@ -1417,7 +1432,7 @@ async def _react_agent_stream_impl(
         ActiveTurnInProgress,
         AgentEventDao,
         AgentRolloutSession,
-        maybe_compact,
+        maybe_compact_async,
     )
     from dbgpt_serve.conversation.serve import Serve as ConversationServe
 
@@ -3257,14 +3272,17 @@ Thought/Action/Action Input format shown above.
     async def _load_rollout_projection():
         await run_in_threadpool(rollout_session.assert_turn_lease)
         if budget_config.context_compaction_enabled:
-            # F4: compaction runs inside the loader wrapper, so the current
-            # request already sees the compacted view. The coordinator
-            # returns the transcript it loaded (re-read once after a commit),
+            # F4: the coordinator runs inside the loader wrapper, so the
+            # current request already sees the compacted view. The summary
+            # strategy may issue one LLM call on this critical path (§3.1);
+            # any failure falls back to the cheap prune kernel. The loaded
+            # projection is returned as-is (re-read once after a commit),
             # keeping the normal path at a single projection load.
-            outcome = await run_in_threadpool(
-                maybe_compact,
+            outcome = await maybe_compact_async(
                 rollout_session,
                 budget_config,
+                llm_client=agent.llm_client,
+                llm_model=dialogue.model_name,
                 window_tokens=compaction_window_tokens,
                 dry_run=budget_config.context_compaction_dry_run,
             )

@@ -78,6 +78,9 @@ class ContextBudgetConfig:
         pressure_soft_factor: float = 1.5,
         min_saving_chars: int = 500,
         prune_args_preview_chars: int = 80,
+        summary_trim_max_attempts: int = 8,
+        summary_failure_threshold: int = 3,
+        summary_cooldown_seconds: int = 60,
     ):
         # `max_context_tokens <= 0` means "auto-detect from model metadata".
         # If the caller could not resolve metadata, keep the context window usable
@@ -116,6 +119,9 @@ class ContextBudgetConfig:
         self.pressure_soft_factor = pressure_soft_factor
         self.min_saving_chars = min_saving_chars
         self.prune_args_preview_chars = prune_args_preview_chars
+        self.summary_trim_max_attempts = summary_trim_max_attempts
+        self.summary_failure_threshold = summary_failure_threshold
+        self.summary_cooldown_seconds = summary_cooldown_seconds
 
     @property
     def effective_budget(self) -> int:
