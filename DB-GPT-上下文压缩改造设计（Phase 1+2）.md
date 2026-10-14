@@ -9,6 +9,8 @@
 > **2026-10-14 已定（与用户确认）**：Phase 1 三项范围；与 Phase 2 合并为一批；剪枝形态 = **激进一行**（不落盘、不建 per-tool 模板；详情找回 = **重跑同一调用**，参数仍在 transcript）。
 >
 > **v2 修订（2026-10-14 自评审）**：F1 去重"破引用"修正（保留副本可剪 → 不去重）；F2 新增 `select_summary_region`（连续前缀段、吸收旧摘要）；F3 `CompactionWindow.tail_tokens`（泄压阀数据来源）；F4 trim-retry 上限语义；F5 组 4/5 同批约束；F6 摘要延迟/超时/lease；F7 无帽按后端显式处理；F8 `tool_success` 不清理 + persisted 不参与去重；F9 净收益门措辞 + `min_prune_chars` 观测项。
+>
+> **实施交接 Brief**：《[DB-GPT-实施交接Brief（Phase 1+2）](./DB-GPT-实施交接Brief（Phase 1+2）.md)》——自包含施工任务书（6 组提交 / 基线红线 / 环境命令 / 验收三态 / 报告模板）。
 
 ---
 
