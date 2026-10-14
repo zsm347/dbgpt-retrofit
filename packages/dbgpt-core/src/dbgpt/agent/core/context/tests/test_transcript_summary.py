@@ -9,6 +9,8 @@ from dbgpt.agent.core.context.transcript_compaction import (
     select_summary_region,
 )
 from dbgpt.agent.core.context.transcript_summary import (
+    HANDOFF_TEMPLATE,
+    HYBRID_TEMPLATE,
     SECTIONS6_TEMPLATE,
     SUMMARY_END_MARKER,
     build_summary_message_content,
@@ -16,6 +18,7 @@ from dbgpt.agent.core.context.transcript_summary import (
     is_context_overflow_error,
     serialize_region,
     summarize_region,
+    summary_template_for,
 )
 from dbgpt.core.interface.message import ModelMessage
 from dbgpt.util.error_types import LLMChatError
@@ -420,3 +423,57 @@ async def test_non_overflow_errors_do_not_trim():
         await summarize_region(messages, client, "stub-model", _config())
 
     assert len(client.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Template switch (§3.7)
+# ---------------------------------------------------------------------------
+
+
+def test_summary_template_switch_selects_all_three_variants():
+    messages = [_human("only message")]
+
+    sections6 = build_summary_prompt(
+        messages, summary_template_for(_config(summary_template="sections6"))
+    )
+    assert "1. Original Task" in sections6
+    assert "6. Next Steps" in sections6
+    assert "User Constraints & Preferences" not in sections6
+
+    handoff = build_summary_prompt(
+        messages, summary_template_for(_config(summary_template="handoff"))
+    )
+    assert "3. What Remains" in handoff
+    assert "Original Task" not in handoff
+
+    hybrid = build_summary_prompt(
+        messages, summary_template_for(_config(summary_template="hybrid"))
+    )
+    assert "User Constraints & Preferences" in hybrid
+    assert "1. Original Task" in hybrid
+    assert "another LLM that will resume this task" in hybrid
+    assert "must not be redone" in hybrid
+
+    assert SECTIONS6_TEMPLATE != HANDOFF_TEMPLATE != HYBRID_TEMPLATE
+
+
+def test_summary_template_defaults_to_hybrid_and_falls_back_on_unknown():
+    assert _config().summary_template == "hybrid"
+    assert summary_template_for(_config()) == HYBRID_TEMPLATE
+    assert summary_template_for(_config(summary_template="nonsense")) == (
+        HYBRID_TEMPLATE
+    )
+
+
+@pytest.mark.asyncio
+async def test_summarize_region_uses_the_configured_template():
+    messages = _trim_scenario_turns()
+    client = _StubSummaryClient()
+
+    await summarize_region(
+        messages, client, "stub-model", _config(summary_template="handoff")
+    )
+
+    prompt = client.calls[0]["messages"][0]["content"]
+    assert "3. What Remains" in prompt
+    assert "User Constraints & Preferences" not in prompt

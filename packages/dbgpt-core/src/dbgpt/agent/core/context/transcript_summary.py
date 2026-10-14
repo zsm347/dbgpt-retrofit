@@ -39,6 +39,64 @@ variable names.
 6. Next Steps: <remaining work, or "None" if task is complete>
 """
 
+# Codex-style four-section handoff summary ("for another LLM about to take
+# over"), see §3.7 "handoff".
+HANDOFF_TEMPLATE = """\
+You are writing a handoff summary for another LLM that will resume this task. \
+Be precise — preserve exact names, paths, values, and variable names.
+
+## Conversation to summarize
+{conversation_text}
+
+## Output format (use exactly these headings)
+1. Progress: <what has been done, and the key decisions taken>
+2. Context: <constraints, environment details, and user preferences that matter>
+3. What Remains: <the remaining work, or "None" if the task is complete>
+4. Critical Data: <exact values, paths, variable names, ids — must be precise>
+"""
+
+# Combined third variant (§3.7, default): six-section skeleton plus a
+# "User Constraints & Preferences" slot, handoff framing and an explicit
+# do-not-redo closing.
+HYBRID_TEMPLATE = """\
+You are writing a handoff summary for another LLM that will resume this task. \
+Condense the conversation history into a structured summary. Be precise — \
+preserve exact names, paths, values, and variable names.
+
+## Conversation to summarize
+{conversation_text}
+
+## Output format (use exactly these headings)
+1. Original Task: <one-line description>
+2. Completed Steps: <one line per step, action + key result>
+3. Current State: <what the agent currently knows>
+4. Key Data: <important values, paths, variable names — must be exact>
+5. User Constraints & Preferences: <explicit user constraints, \
+preferences and corrections — or "None">
+6. Errors Encountered: <failures and how they were resolved, or "None">
+7. Next Steps: <remaining work, or "None" if task is complete>
+
+The work already completed must not be redone; continue only from Next Steps.
+"""
+
+SUMMARY_TEMPLATES = {
+    "sections6": SECTIONS6_TEMPLATE,
+    "handoff": HANDOFF_TEMPLATE,
+    "hybrid": HYBRID_TEMPLATE,
+}
+
+
+def summary_template_name(config: ContextBudgetConfig) -> str:
+    """Resolve the configured template name; unknown values fall back."""
+    name = str(getattr(config, "summary_template", None) or "hybrid").lower()
+    return name if name in SUMMARY_TEMPLATES else "hybrid"
+
+
+def summary_template_for(config: ContextBudgetConfig) -> str:
+    """Resolve the configured summary template text."""
+    return SUMMARY_TEMPLATES[summary_template_name(config)]
+
+
 # Hermes' _SUMMARY_END_MARKER: tells the model to answer the live message,
 # not the summary above (§3.4).
 SUMMARY_END_MARKER = (
@@ -143,9 +201,10 @@ async def summarize_region(
     no_progress = 0
     llm_calls = 0
 
+    template = summary_template_for(config)
     while True:
         sliced = [messages[index] for turn in working for index in turn.indices]
-        prompt = build_summary_prompt(sliced)
+        prompt = build_summary_prompt(sliced, template)
         llm_calls += 1
         try:
             text = await llm_client.create(

@@ -401,6 +401,14 @@ class AgentContextParameters(BaseParameters):
         default=60,
         metadata={"help": _("Summary failure cooldown duration in seconds")},
     )
+    summary_template: str = field(
+        default="hybrid",
+        metadata={
+            "help": _(
+                "Summary prompt template: sections6 / handoff / hybrid"
+            )
+        },
+    )
 
     def __post_init__(self):
         if self.max_context_tokens is None or self.max_context_tokens <= 0:

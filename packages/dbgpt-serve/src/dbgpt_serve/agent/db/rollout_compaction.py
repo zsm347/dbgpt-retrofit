@@ -40,6 +40,7 @@ from dbgpt.agent.core.context.transcript_compaction import (
 from dbgpt.agent.core.context.transcript_summary import (
     build_summary_message_content,
     summarize_region,
+    summary_template_name,
 )
 from dbgpt.agent.core.rollout import ChatCompletionHistoryProjection
 
@@ -211,6 +212,7 @@ def _log_summary_dry_run(
         "threshold": decision.threshold,
         "region_tokens": decision.region_tokens,
         "assumed_reclaim": decision.assumed_reclaim,
+        "would_template": summary_template_name(config),
     }
     logger.info(
         "%s %s",

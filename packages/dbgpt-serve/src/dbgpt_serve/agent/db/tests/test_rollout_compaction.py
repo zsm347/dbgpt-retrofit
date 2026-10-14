@@ -614,6 +614,7 @@ def test_dry_run_summary_records_the_plan_without_calling_the_llm(
     assert fields["threshold"] == 1000
     assert fields["region_tokens"] > 0
     assert fields["assumed_reclaim"] > 0
+    assert fields["would_template"] == "hybrid"
 
 
 def test_summary_append_failure_leaves_the_event_stream_unchanged(conversation_db):

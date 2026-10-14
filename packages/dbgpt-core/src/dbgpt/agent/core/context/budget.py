@@ -81,6 +81,7 @@ class ContextBudgetConfig:
         summary_trim_max_attempts: int = 8,
         summary_failure_threshold: int = 3,
         summary_cooldown_seconds: int = 60,
+        summary_template: str = "hybrid",
     ):
         # `max_context_tokens <= 0` means "auto-detect from model metadata".
         # If the caller could not resolve metadata, keep the context window usable
@@ -122,6 +123,7 @@ class ContextBudgetConfig:
         self.summary_trim_max_attempts = summary_trim_max_attempts
         self.summary_failure_threshold = summary_failure_threshold
         self.summary_cooldown_seconds = summary_cooldown_seconds
+        self.summary_template = summary_template
 
     @property
     def effective_budget(self) -> int:
