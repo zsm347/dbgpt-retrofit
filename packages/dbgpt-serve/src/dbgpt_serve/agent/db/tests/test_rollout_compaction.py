@@ -444,21 +444,26 @@ def _summary_config(**overrides):
     return _compaction_config(**values)
 
 
-def test_summary_strategy_commits_and_shows_a_mid_transcript_summary(conversation_db):
+def test_summary_strategy_commits_and_shows_a_mid_transcript_summary(
+    conversation_db, caplog
+):
     _summary_failures.reset("conv-1")
     session = AgentRolloutSession("conv-1", str(uuid4()))
     _seed_session(session)
     summarizer = _StubSummarizer()
 
-    outcome = asyncio.run(
-        maybe_compact_async(
-            session,
-            _summary_config(),
-            llm_client=summarizer,
-            llm_model="stub-model",
-            window_tokens=200000,
+    with caplog.at_level(
+        logging.INFO, logger="dbgpt_serve.agent.db.rollout_compaction"
+    ):
+        outcome = asyncio.run(
+            maybe_compact_async(
+                session,
+                _summary_config(),
+                llm_client=summarizer,
+                llm_model="stub-model",
+                window_tokens=200000,
+            )
         )
-    )
 
     assert outcome.appended is not None
     payload = outcome.appended.payload
@@ -476,6 +481,17 @@ def test_summary_strategy_commits_and_shows_a_mid_transcript_summary(conversatio
     assert projection.messages[0].content == summary_content
     assert projection.messages[-1].content == "current question"
     assert projection.last_compaction is not None
+    # §8 observation: the committed log carries the summary duration/calls.
+    committed = [
+        json.loads(record.getMessage().split(" ", 1)[1])
+        for record in caplog.records
+        if record.getMessage().startswith(COMPACTION_LOG_PREFIX)
+        and '"event": "committed"' in record.getMessage()
+        and '"strategy": "summary"' in record.getMessage()
+    ]
+    assert len(committed) == 1
+    assert committed[0]["summary_llm_calls"] == 1
+    assert committed[0]["summary_seconds"] >= 0
 
 
 def test_prune_strategy_is_used_below_the_summary_threshold(conversation_db):

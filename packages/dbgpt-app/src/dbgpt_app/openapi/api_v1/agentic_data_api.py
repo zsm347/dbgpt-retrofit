@@ -316,6 +316,11 @@ async def _load_context_budget_config(
                 "summary_cooldown_seconds",
                 defaults.summary_cooldown_seconds,
             ),
+            summary_time_budget_seconds=_value(
+                agent_context,
+                "summary_time_budget_seconds",
+                defaults.summary_time_budget_seconds,
+            ),
             summary_template=_value(
                 agent_context,
                 "summary_template",

@@ -859,7 +859,8 @@ def test_pressure_still_requires_the_reclaim_gate():
     decision = decide_compaction(projection, config, 200000)
 
     assert decision.gate == "pressure"
-    assert decision.pressure_stage is None
+    # Even on rejection the best trial's stage is kept for the audit log.
+    assert decision.pressure_stage == "A"
     assert not decision.should_compact
     assert decision.would_reclaim > 0
 

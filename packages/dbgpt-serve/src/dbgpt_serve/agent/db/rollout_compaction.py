@@ -340,8 +340,14 @@ async def maybe_compact_async(
         )
 
     try:
-        prune_decision = decide_compaction(projection, config, window_tokens)
-        summary_decision = decide_summary(projection, config, window_tokens)
+        # §3.1: decisions are CPU-heavy (full-transcript passes, pressure
+        # trials) — keep them off the event loop like the projection load.
+        prune_decision = await run_in_threadpool(
+            decide_compaction, projection, config, window_tokens
+        )
+        summary_decision = await run_in_threadpool(
+            decide_summary, projection, config, window_tokens
+        )
     except Exception:
         logger.exception(
             "%s failed to evaluate compaction; leaving transcript unchanged",
@@ -378,8 +384,10 @@ async def maybe_compact_async(
         and not _summary_failures.in_cooldown(session.conv_id)
     ):
         region = summary_decision.region
+        started = time.perf_counter()
+        summary_calls = 0
         try:
-            summary_text, _llm_calls = await summarize_region(
+            summary_text, summary_calls = await summarize_region(
                 projection.messages[: region.end],
                 llm_client,
                 llm_model,
@@ -391,16 +399,25 @@ async def maybe_compact_async(
             summary_content = build_summary_message_content(
                 summary_text, region.end - region.start
             )
-            draft = assemble_summary_draft(
-                projection, region, summary_content, config, window_tokens
+            # §3.1: replacement assembly is another full-transcript pass.
+            draft = await run_in_threadpool(
+                assemble_summary_draft,
+                projection,
+                region,
+                summary_content,
+                config,
+                window_tokens,
             )
             if draft is None:
                 raise ValueError("summary replacement brings no reduction")
         except Exception as exc:
             _summary_failures.record_failure(session.conv_id, config)
             logger.warning(
-                "%s summary failed; falling back to prune: %s",
+                "%s summary failed after %.3fs (%d llm calls); "
+                "falling back to prune: %s",
                 COMPACTION_LOG_PREFIX,
+                time.perf_counter() - started,
+                summary_calls,
                 str(exc)[:200],
             )
             draft = None
@@ -439,6 +456,8 @@ async def maybe_compact_async(
             strategy="summary",
             event_seq=stored.event_seq,
             rearm_tokens=draft.rearm_tokens,
+            summary_seconds=round(time.perf_counter() - started, 4),
+            summary_llm_calls=summary_calls,
         )
         refreshed = await run_in_threadpool(session.load_projection)
         return CompactionOutcome(

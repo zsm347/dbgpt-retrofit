@@ -2,6 +2,7 @@
 
 import pytest
 
+from dbgpt.agent.core.context import transcript_summary as transcript_summary_module
 from dbgpt.agent.core.context.budget import ContextBudgetConfig
 from dbgpt.agent.core.context.transcript_compaction import (
     assemble_summary_draft,
@@ -412,6 +413,75 @@ async def test_trim_retry_gives_up_bounded_when_only_one_turn_remains():
 
     # Three turns -> three attempts (last one on the single remaining turn).
     assert len(client.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_trim_retry_respects_the_total_call_budget():
+    messages = []
+    for index in range(12):
+        messages.extend(
+            [
+                _human(f"turn {index}"),
+                _ai("", [_call(f"c{index}")]),
+                _tool(f"c{index}", "R" * 200),
+            ]
+        )
+    overflow = ValueError("maximum context length exceeded")
+    client = _StubSummaryClient(script=[overflow] * 20)
+    config = _config(summary_trim_max_attempts=8)
+
+    with pytest.raises(ValueError, match="call budget exhausted"):
+        await summarize_region(messages, client, "stub-model", config)
+
+    # Cap counts the first call: exactly 8 calls, not one per turn.
+    assert len(client.calls) == 8
+
+
+class _FakeClock:
+    def __init__(self, values):
+        self._values = list(values)
+        self._last = 0.0
+
+    def monotonic(self):
+        if self._values:
+            self._last = self._values.pop(0)
+        return self._last
+
+
+@pytest.mark.asyncio
+async def test_time_budget_stops_before_the_next_call(monkeypatch):
+    messages = _trim_scenario_turns()
+    overflow = ValueError("maximum context length exceeded")
+    client = _StubSummaryClient(script=[overflow, "never reached"])
+    # deadline calc -> 0, first pre-call check -> 0, second -> past budget.
+    monkeypatch.setattr(
+        transcript_summary_module, "time", _FakeClock([0.0, 0.0, 100.0])
+    )
+    config = _config(summary_time_budget_seconds=60)
+
+    with pytest.raises(TimeoutError, match="time budget exhausted"):
+        await summarize_region(messages, client, "stub-model", config)
+
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_time_budget_zero_disables_the_clock(monkeypatch):
+    messages = _trim_scenario_turns()
+    overflow = ValueError("maximum context length exceeded")
+    client = _StubSummaryClient(script=[overflow, overflow, overflow])
+    # Even a clock far past any budget must not fire while the budget is 0.
+    monkeypatch.setattr(
+        transcript_summary_module,
+        "time",
+        _FakeClock([0.0, 10_000.0, 20_000.0, 30_000.0, 40_000.0]),
+    )
+    config = _config(summary_time_budget_seconds=0)
+
+    with pytest.raises(ValueError, match="prompt is too long|context length"):
+        await summarize_region(messages, client, "stub-model", config)
+
+    assert len(client.calls) >= 1
 
 
 @pytest.mark.asyncio

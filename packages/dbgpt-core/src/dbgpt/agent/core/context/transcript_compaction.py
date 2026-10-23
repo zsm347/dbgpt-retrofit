@@ -985,6 +985,7 @@ def decide_compaction(
     soft_budget = int(config.protect_tail_tokens * config.pressure_soft_factor)
     if compaction_window.tail_tokens > soft_budget:
         best: Optional[Tuple[int, int, int, list[dict], PruneStats]] = None
+        best_stage: Optional[str] = None
         any_stage = False
         for stage in ("A", "B", "C"):
             stage_window = select_window(
@@ -1008,6 +1009,7 @@ def decide_compaction(
                     s_replacement,
                     s_stats,
                 )
+                best_stage = stage
             if s_reclaimed >= min_reclaim:
                 return committed(
                     s_replacement,
@@ -1018,7 +1020,8 @@ def decide_compaction(
                     pressure_stage=stage,
                 )
         if any_stage and best is not None:
-            # Relief ran but could not clear the reclaim gate either.
+            # Relief ran but could not clear the reclaim gate either; record
+            # the stage that produced the best trial for the audit log.
             return CompactionDecision(
                 gate="pressure",
                 est_tokens=est,
@@ -1027,6 +1030,7 @@ def decide_compaction(
                 would_reclaim=best[0],
                 would_prune_count=best[1],
                 would_dedupe_count=best[2],
+                pressure_stage=best_stage,
             )
 
     return CompactionDecision(

@@ -401,6 +401,15 @@ class AgentContextParameters(BaseParameters):
         default=60,
         metadata={"help": _("Summary failure cooldown duration in seconds")},
     )
+    summary_time_budget_seconds: int = field(
+        default=60,
+        metadata={
+            "help": _(
+                "Wall-clock budget for one summary attempt before falling "
+                "back to pruning; 0 disables the clock"
+            )
+        },
+    )
     summary_template: str = field(
         default="hybrid",
         metadata={

@@ -8,6 +8,7 @@ trigger gating, failure policy and the event commit live in the coordinator
 
 from __future__ import annotations
 
+import time
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
 from dbgpt.util.error_types import LLMChatError
@@ -186,9 +187,17 @@ async def summarize_region(
     ``generate_text``, which swallows errors into an empty string) with an
     explicit uncapped ``max_new_tokens=None`` (F7). On a context-window
     overflow the oldest turn is dropped from the input and the call is
-    retried; the loop terminates once a single turn remains. The
-    ``summary_trim_max_attempts`` budget only bounds retries that make no
-    progress, and a successful trim resets it (F4).
+    retried.
+
+    Three terminators bound the loop together (first one wins):
+    1. only one turn remains (nothing left to trim);
+    2. ``summary_trim_max_attempts`` LLM calls in total, the first call
+       included (F4 revised: the former "no-progress retry" reading could
+       never fire while every retry trims a turn);
+    3. ``summary_time_budget_seconds`` wall-clock budget, checked before
+       each call (0 disables it). The client has no per-call timeout, so an
+       in-flight call is never interrupted — the budget only prevents the
+       next one.
 
     Raises on failure — the coordinator owns the fallback (prune) and the
     failure cooldown.
@@ -197,12 +206,22 @@ async def summarize_region(
     if not turns:
         raise ValueError("nothing to summarize")
     working = list(turns)
-    max_no_progress = max(1, int(config.summary_trim_max_attempts))
-    no_progress = 0
+    max_llm_calls = max(1, int(config.summary_trim_max_attempts))
+    time_budget = max(0.0, float(config.summary_time_budget_seconds or 0))
+    deadline = time.monotonic() + time_budget if time_budget > 0 else None
     llm_calls = 0
 
     template = summary_template_for(config)
     while True:
+        if llm_calls >= max_llm_calls:
+            raise ValueError(
+                "summary trim call budget exhausted "
+                f"({max_llm_calls} LLM calls)"
+            )
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"summary time budget exhausted ({time_budget:.0f}s)"
+            )
         sliced = [messages[index] for turn in working for index in turn.indices]
         prompt = build_summary_prompt(sliced, template)
         llm_calls += 1
@@ -221,15 +240,8 @@ async def summarize_region(
                 # path (the coordinator counts it and cools down).
                 raise
             if len(working) <= 1:
-                # Terminator: a single turn cannot be trimmed any further.
+                # Terminator 1: a single turn cannot be trimmed any further.
                 raise
-            before = len(working)
             working = working[1:]
-            if len(working) < before:
-                no_progress = 0  # progress resets the retry budget (F4)
-            else:
-                no_progress += 1
-                if no_progress >= max_no_progress:
-                    raise
             continue
         return (text or "").strip(), llm_calls
